@@ -42,6 +42,8 @@ target_sources(
         view_fast_path.cpp
         view_index_bind.cpp
         duckdb_copy_filesystem.cpp
+        duckdb_zip_filesystem.cpp
+        zip_reader.cpp
         duckdb_physical_search_delete.cpp
         duckdb_physical_search_insert.cpp
         duckdb_physical_search_update.cpp
@@ -61,8 +63,6 @@ target_sources(
 
 target_link_libraries(sereneserver PRIVATE simdjson)
 
-# view_fast_path.cpp reads iceberg-bound snapshot ids; iceberg's REST
-# headers include yyjson unprefixed.
 target_include_directories(
     sereneserver
     PRIVATE

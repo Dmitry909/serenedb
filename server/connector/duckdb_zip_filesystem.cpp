@@ -1,0 +1,264 @@
+#include "connector/duckdb_zip_filesystem.hpp"
+
+#include <sys/stat.h>
+
+#include <cerrno>
+#include <cstring>
+#include <duckdb/common/file_opener.hpp>
+#include <duckdb/main/client_context.hpp>
+#include <duckdb/main/database.hpp>
+#include <mutex>
+#include <new>
+#include <optional>
+
+namespace sdb::connector {
+namespace {
+
+[[noreturn]] void Translate(const zip::Error& error) {
+  if (error.kind == zip::ErrorKind::Memory) {
+    throw duckdb::OutOfMemoryException("%s", error.what());
+  }
+  if (error.kind == zip::ErrorKind::Unsupported) {
+    throw duckdb::NotImplementedException("%s", error.what());
+  }
+  throw duckdb::IOException("%s", error.what());
+}
+
+class LocalSource final : public zip::Source {
+ public:
+  LocalSource(duckdb::unique_ptr<duckdb::FileSystem> fs,
+              duckdb::unique_ptr<duckdb::FileHandle> file,
+              duckdb::optional_ptr<duckdb::ClientContext> client)
+    : fs{std::move(fs)},
+      file{std::move(file)},
+      size{this->file->GetFileSize()},
+      modified{this->fs->GetLastModifiedTime(*this->file)} {
+    if (client) {
+      context = client->shared_from_this();
+    }
+  }
+  uint64_t Size() const final { return size; }
+  void Check() final {
+    if (auto client = context.lock()) {
+      client->InterruptCheck();
+    }
+    if (file->GetFileSize() != size ||
+        fs->GetLastModifiedTime(*file) != modified) {
+      throw duckdb::IOException("ZIP archive changed while reading");
+    }
+  }
+  void ReadAt(uint64_t offset, std::span<std::byte> output) final {
+    Check();
+    if (offset > uint64_t(size) || output.size() > uint64_t(size) - offset) {
+      throw duckdb::IOException("ZIP read exceeds archive bounds");
+    }
+    file->Read(output.data(), output.size(), offset);
+  }
+
+  duckdb::unique_ptr<duckdb::FileSystem> fs;
+  duckdb::unique_ptr<duckdb::FileHandle> file;
+  uint64_t size;
+  duckdb::timestamp_t modified;
+  duckdb::weak_ptr<duckdb::ClientContext> context;
+};
+
+class ZipHandle final : public duckdb::FileHandle {
+ public:
+  ZipHandle(duckdb::FileSystem& fs, const std::string& path,
+            duckdb::FileOpenFlags flags,
+            duckdb::unique_ptr<duckdb::FileSystem> local,
+            duckdb::unique_ptr<duckdb::FileHandle> file,
+            duckdb::optional_ptr<duckdb::ClientContext> client,
+            std::string_view member)
+    : FileHandle{fs, path, flags},
+      source{std::move(local), std::move(file), client},
+      reader{std::in_place, source, zip::FindEntry(source, member)} {}
+  ~ZipHandle() noexcept final { Close(); }
+  void Close() final {
+    std::lock_guard lock{mutex};
+    reader.reset();
+    source.file.reset();
+  }
+  zip::Reader& GetReader() {
+    if (!reader) {
+      throw duckdb::IOException("ZIP file is closed");
+    }
+    return *reader;
+  }
+  LocalSource source;
+  std::optional<zip::Reader> reader;
+  std::mutex mutex;
+};
+
+void ValidateCount(int64_t count) {
+  if (count < 0) {
+    throw duckdb::IOException("Negative ZIP read length");
+  }
+}
+
+}
+
+bool ZipFileSystem::CanHandleFile(const std::string& path) {
+  return path.starts_with("zip://");
+}
+
+duckdb::unique_ptr<duckdb::FileHandle> ZipFileSystem::OpenFile(
+  const std::string& path, duckdb::FileOpenFlags flags,
+  duckdb::optional_ptr<duckdb::FileOpener> opener) {
+  try {
+    const auto parsed = zip::ParsePath(path);
+    if (!flags.OpenForReading() || flags.OpenForWriting() ||
+        flags.CreateFileIfNotExists() || flags.OverwriteExistingFile() ||
+        flags.OpenForAppending()) {
+      throw duckdb::NotImplementedException("ZIP filesystem is read-only");
+    }
+    auto db = duckdb::FileOpener::TryGetDatabase(opener);
+    if (!db) {
+      throw duckdb::IOException("ZIP reading requires a database file opener");
+    }
+    auto local = duckdb::FileSystem::CreateLocal();
+    const auto archive = local->ExpandPath(std::string{parsed.archive}, opener);
+    auto& registered = duckdb::FileSystem::GetFileSystem(*db);
+    if (registered.SubSystemIsDisabled(local->GetName())) {
+      throw duckdb::PermissionException("Local filesystem is disabled");
+    }
+    if (!db->config.CanAccessFile(archive,
+                                  duckdb::FileType::FILE_TYPE_REGULAR)) {
+      throw duckdb::PermissionException("Cannot access ZIP archive: %s",
+                                        archive);
+    }
+    struct stat stat;
+    if (::stat(archive.c_str(), &stat) != 0) {
+      if (errno == ENOENT && flags.ReturnNullIfNotExists()) {
+        return nullptr;
+      }
+      throw duckdb::IOException("Cannot stat ZIP archive '%s': %s", archive,
+                                std::strerror(errno));
+    }
+    if (!S_ISREG(stat.st_mode)) {
+      throw duckdb::NotImplementedException(
+        "ZIP source must be a regular local file");
+    }
+    const auto canonical = local->CanonicalizePath(archive, opener);
+    if (!db->config.CanAccessFile(canonical,
+                                  duckdb::FileType::FILE_TYPE_REGULAR)) {
+      throw duckdb::PermissionException("Cannot access ZIP archive: %s",
+                                        canonical);
+    }
+    auto file =
+      local->OpenFile(archive, duckdb::FileFlags::FILE_FLAGS_READ, opener);
+    if (file->GetType() != duckdb::FileType::FILE_TYPE_REGULAR ||
+        !file->CanSeek()) {
+      throw duckdb::IOException("ZIP source must remain a regular local file");
+    }
+    return duckdb::make_uniq<ZipHandle>(
+      *this, path, flags, std::move(local), std::move(file),
+      duckdb::FileOpener::TryGetClientContext(opener), parsed.member);
+  } catch (const zip::Error& error) {
+    if (error.kind == zip::ErrorKind::Missing &&
+        flags.ReturnNullIfNotExists()) {
+      return nullptr;
+    }
+    Translate(error);
+  } catch (const std::bad_alloc&) {
+    throw duckdb::OutOfMemoryException("ZIP allocation failed");
+  }
+}
+
+int64_t ZipFileSystem::Read(duckdb::FileHandle& handle, void* buffer,
+                            int64_t count) {
+  ValidateCount(count);
+  auto& zip = handle.Cast<ZipHandle>();
+  std::lock_guard lock{zip.mutex};
+  try {
+    return zip.GetReader().Read(
+      {static_cast<std::byte*>(buffer), static_cast<size_t>(count)});
+  } catch (const zip::Error& error) {
+    Translate(error);
+  } catch (const std::bad_alloc&) {
+    throw duckdb::OutOfMemoryException("ZIP allocation failed");
+  }
+}
+
+void ZipFileSystem::Read(duckdb::FileHandle& handle, void* buffer,
+                         int64_t count, duckdb::idx_t offset) {
+  ValidateCount(count);
+  auto& zip = handle.Cast<ZipHandle>();
+  std::lock_guard lock{zip.mutex};
+  try {
+    zip.GetReader().ReadAt(
+      offset, {static_cast<std::byte*>(buffer), static_cast<size_t>(count)});
+  } catch (const zip::Error& error) {
+    Translate(error);
+  } catch (const std::bad_alloc&) {
+    throw duckdb::OutOfMemoryException("ZIP allocation failed");
+  }
+}
+
+void ZipFileSystem::Seek(duckdb::FileHandle& handle, duckdb::idx_t offset) {
+  auto& zip = handle.Cast<ZipHandle>();
+  std::lock_guard lock{zip.mutex};
+  try {
+    zip.GetReader().Seek(offset);
+  } catch (const zip::Error& error) {
+    Translate(error);
+  } catch (const std::bad_alloc&) {
+    throw duckdb::OutOfMemoryException("ZIP allocation failed");
+  }
+}
+
+void ZipFileSystem::Reset(duckdb::FileHandle& handle) { Seek(handle, 0); }
+
+duckdb::idx_t ZipFileSystem::SeekPosition(duckdb::FileHandle& handle) {
+  auto& zip = handle.Cast<ZipHandle>();
+  std::lock_guard lock{zip.mutex};
+  return zip.GetReader().Position();
+}
+
+int64_t ZipFileSystem::GetFileSize(duckdb::FileHandle& handle) {
+  auto& zip = handle.Cast<ZipHandle>();
+  std::lock_guard lock{zip.mutex};
+  return zip.GetReader().Size();
+}
+
+duckdb::timestamp_t ZipFileSystem::GetLastModifiedTime(
+  duckdb::FileHandle& handle) {
+  auto& zip = handle.Cast<ZipHandle>();
+  std::lock_guard lock{zip.mutex};
+  zip.GetReader();
+  return zip.source.modified;
+}
+
+duckdb::FileType ZipFileSystem::GetFileType(duckdb::FileHandle& handle) {
+  return duckdb::FileType::FILE_TYPE_REGULAR;
+}
+
+bool ZipFileSystem::FileExists(
+  const std::string& path, duckdb::optional_ptr<duckdb::FileOpener> opener) {
+  return bool(OpenFile(path,
+                       duckdb::FileFlags::FILE_FLAGS_READ |
+                         duckdb::FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS,
+                       opener));
+}
+
+duckdb::vector<duckdb::OpenFileInfo> ZipFileSystem::Glob(
+  const std::string& path, duckdb::FileOpener* opener) {
+  try {
+    zip::ParsePath(path);
+  } catch (const zip::Error& error) {
+    Translate(error);
+  } catch (const std::bad_alloc&) {
+    throw duckdb::OutOfMemoryException("ZIP allocation failed");
+  }
+  return {duckdb::OpenFileInfo{path}};
+}
+
+bool ZipFileSystem::ListFiles(
+  const std::string& path,
+  const std::function<void(const std::string&, bool)>& callback,
+  duckdb::FileOpener* opener) {
+  throw duckdb::NotImplementedException(
+    "ZIP directory listing is not supported yet");
+}
+
+}
