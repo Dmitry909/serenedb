@@ -38,6 +38,7 @@
 #include "connector/duckdb_storage_extension.h"
 #include "connector/duckdb_tokenizer_function.h"
 #include "connector/duckdb_vacuum_function.h"
+#include "connector/duckdb_zip_filesystem.hpp"
 #include "connector/functions/ai/ai.h"
 #include "connector/functions/array.h"
 #include "connector/functions/catalog_introspect.h"
@@ -373,6 +374,7 @@ void RegisterServerExtensions(duckdb::DatabaseInstance& db) {
   // Intercepts "/dev/stdin" and reads from PG CopyData messages.
   auto& fs = duckdb::FileSystem::GetFileSystem(db);
   fs.RegisterSubSystem(duckdb::make_uniq<connector::SereneDBCopyFileSystem>());
+  fs.RegisterSubSystem(duckdb::make_uniq<connector::ZipFileSystem>());
 
   // Parse and cache system functions/views for serving from our attached
   // catalog.
