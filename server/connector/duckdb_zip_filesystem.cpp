@@ -1,3 +1,23 @@
+////////////////////////////////////////////////////////////////////////////////
+/// DISCLAIMER
+///
+/// Copyright 2026 SereneDB GmbH, Berlin, Germany
+///
+/// Licensed under the Apache License, Version 2.0 (the "License");
+/// you may not use this file except in compliance with the License.
+/// You may obtain a copy of the License at
+///
+///     http://www.apache.org/licenses/LICENSE-2.0
+///
+/// Unless required by applicable law or agreed to in writing, software
+/// distributed under the License is distributed on an "AS IS" BASIS,
+/// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+/// See the License for the specific language governing permissions and
+/// limitations under the License.
+///
+/// Copyright holder is SereneDB GmbH, Berlin, Germany
+////////////////////////////////////////////////////////////////////////////////
+
 #include "connector/duckdb_zip_filesystem.hpp"
 
 #include <sys/stat.h>
@@ -11,17 +31,19 @@
 #include <new>
 #include <optional>
 
+#include "iresearch/utils/pg/sql_exception_macro.hpp"
+
 namespace sdb::connector {
 namespace {
 
 [[noreturn]] void Translate(const zip::Error& error) {
   if (error.kind == zip::ErrorKind::Memory) {
-    throw duckdb::OutOfMemoryException("%s", error.what());
+    THROW_SQL_ERROR(ERR_CODE(ERRCODE_OUT_OF_MEMORY), ERR_MSG(error.what()));
   }
   if (error.kind == zip::ErrorKind::Unsupported) {
     throw duckdb::NotImplementedException("%s", error.what());
   }
-  throw duckdb::IOException("%s", error.what());
+  THROW_SQL_ERROR(ERR_CODE(ERRCODE_IO_ERROR), ERR_MSG(error.what()));
 }
 
 class LocalSource final : public zip::Source {
@@ -44,13 +66,15 @@ class LocalSource final : public zip::Source {
     }
     if (file->GetFileSize() != size ||
         fs->GetLastModifiedTime(*file) != modified) {
-      throw duckdb::IOException("ZIP archive changed while reading");
+      THROW_SQL_ERROR(ERR_CODE(ERRCODE_IO_ERROR),
+                      ERR_MSG("ZIP archive changed while reading"));
     }
   }
   void ReadAt(uint64_t offset, std::span<std::byte> output) final {
     Check();
     if (offset > uint64_t(size) || output.size() > uint64_t(size) - offset) {
-      throw duckdb::IOException("ZIP read exceeds archive bounds");
+      THROW_SQL_ERROR(ERR_CODE(ERRCODE_IO_ERROR),
+                      ERR_MSG("ZIP read exceeds archive bounds"));
     }
     file->Read(output.data(), output.size(), offset);
   }
@@ -81,7 +105,8 @@ class ZipHandle final : public duckdb::FileHandle {
   }
   zip::Reader& GetReader() {
     if (!reader) {
-      throw duckdb::IOException("ZIP file is closed");
+      THROW_SQL_ERROR(ERR_CODE(ERRCODE_IO_ERROR),
+                      ERR_MSG("ZIP file is closed"));
     }
     return *reader;
   }
@@ -92,11 +117,12 @@ class ZipHandle final : public duckdb::FileHandle {
 
 void ValidateCount(int64_t count) {
   if (count < 0) {
-    throw duckdb::IOException("Negative ZIP read length");
+    THROW_SQL_ERROR(ERR_CODE(ERRCODE_IO_ERROR),
+                    ERR_MSG("Negative ZIP read length"));
   }
 }
 
-}
+}  // namespace
 
 bool ZipFileSystem::CanHandleFile(const std::string& path) {
   return path.starts_with("zip://");
@@ -114,26 +140,29 @@ duckdb::unique_ptr<duckdb::FileHandle> ZipFileSystem::OpenFile(
     }
     auto db = duckdb::FileOpener::TryGetDatabase(opener);
     if (!db) {
-      throw duckdb::IOException("ZIP reading requires a database file opener");
+      THROW_SQL_ERROR(ERR_CODE(ERRCODE_IO_ERROR),
+                      ERR_MSG("ZIP reading requires a database file opener"));
     }
     auto local = duckdb::FileSystem::CreateLocal();
     const auto archive = local->ExpandPath(std::string{parsed.archive}, opener);
     auto& registered = duckdb::FileSystem::GetFileSystem(*db);
     if (registered.SubSystemIsDisabled(local->GetName())) {
-      throw duckdb::PermissionException("Local filesystem is disabled");
+      THROW_SQL_ERROR(ERR_CODE(ERRCODE_INSUFFICIENT_PRIVILEGE),
+                      ERR_MSG("Local filesystem is disabled"));
     }
     if (!db->config.CanAccessFile(archive,
                                   duckdb::FileType::FILE_TYPE_REGULAR)) {
-      throw duckdb::PermissionException("Cannot access ZIP archive: %s",
-                                        archive);
+      THROW_SQL_ERROR(ERR_CODE(ERRCODE_INSUFFICIENT_PRIVILEGE),
+                      ERR_MSG("Cannot access ZIP archive: ", archive));
     }
     struct stat stat;
     if (::stat(archive.c_str(), &stat) != 0) {
       if (errno == ENOENT && flags.ReturnNullIfNotExists()) {
         return nullptr;
       }
-      throw duckdb::IOException("Cannot stat ZIP archive '%s': %s", archive,
-                                std::strerror(errno));
+      THROW_SQL_ERROR(ERR_CODE(ERRCODE_IO_ERROR),
+                      ERR_MSG("Cannot stat ZIP archive '", archive,
+                              "': ", std::strerror(errno)));
     }
     if (!S_ISREG(stat.st_mode)) {
       throw duckdb::NotImplementedException(
@@ -142,14 +171,15 @@ duckdb::unique_ptr<duckdb::FileHandle> ZipFileSystem::OpenFile(
     const auto canonical = local->CanonicalizePath(archive, opener);
     if (!db->config.CanAccessFile(canonical,
                                   duckdb::FileType::FILE_TYPE_REGULAR)) {
-      throw duckdb::PermissionException("Cannot access ZIP archive: %s",
-                                        canonical);
+      THROW_SQL_ERROR(ERR_CODE(ERRCODE_INSUFFICIENT_PRIVILEGE),
+                      ERR_MSG("Cannot access ZIP archive: ", canonical));
     }
     auto file =
       local->OpenFile(archive, duckdb::FileFlags::FILE_FLAGS_READ, opener);
     if (file->GetType() != duckdb::FileType::FILE_TYPE_REGULAR ||
         !file->CanSeek()) {
-      throw duckdb::IOException("ZIP source must remain a regular local file");
+      THROW_SQL_ERROR(ERR_CODE(ERRCODE_IO_ERROR),
+                      ERR_MSG("ZIP source must remain a regular local file"));
     }
     return duckdb::make_uniq<ZipHandle>(
       *this, path, flags, std::move(local), std::move(file),
@@ -161,7 +191,8 @@ duckdb::unique_ptr<duckdb::FileHandle> ZipFileSystem::OpenFile(
     }
     Translate(error);
   } catch (const std::bad_alloc&) {
-    throw duckdb::OutOfMemoryException("ZIP allocation failed");
+    THROW_SQL_ERROR(ERR_CODE(ERRCODE_OUT_OF_MEMORY),
+                    ERR_MSG("ZIP allocation failed"));
   }
 }
 
@@ -176,7 +207,8 @@ int64_t ZipFileSystem::Read(duckdb::FileHandle& handle, void* buffer,
   } catch (const zip::Error& error) {
     Translate(error);
   } catch (const std::bad_alloc&) {
-    throw duckdb::OutOfMemoryException("ZIP allocation failed");
+    THROW_SQL_ERROR(ERR_CODE(ERRCODE_OUT_OF_MEMORY),
+                    ERR_MSG("ZIP allocation failed"));
   }
 }
 
@@ -191,7 +223,8 @@ void ZipFileSystem::Read(duckdb::FileHandle& handle, void* buffer,
   } catch (const zip::Error& error) {
     Translate(error);
   } catch (const std::bad_alloc&) {
-    throw duckdb::OutOfMemoryException("ZIP allocation failed");
+    THROW_SQL_ERROR(ERR_CODE(ERRCODE_OUT_OF_MEMORY),
+                    ERR_MSG("ZIP allocation failed"));
   }
 }
 
@@ -203,7 +236,8 @@ void ZipFileSystem::Seek(duckdb::FileHandle& handle, duckdb::idx_t offset) {
   } catch (const zip::Error& error) {
     Translate(error);
   } catch (const std::bad_alloc&) {
-    throw duckdb::OutOfMemoryException("ZIP allocation failed");
+    THROW_SQL_ERROR(ERR_CODE(ERRCODE_OUT_OF_MEMORY),
+                    ERR_MSG("ZIP allocation failed"));
   }
 }
 
@@ -248,7 +282,8 @@ duckdb::vector<duckdb::OpenFileInfo> ZipFileSystem::Glob(
   } catch (const zip::Error& error) {
     Translate(error);
   } catch (const std::bad_alloc&) {
-    throw duckdb::OutOfMemoryException("ZIP allocation failed");
+    THROW_SQL_ERROR(ERR_CODE(ERRCODE_OUT_OF_MEMORY),
+                    ERR_MSG("ZIP allocation failed"));
   }
   return {duckdb::OpenFileInfo{path}};
 }
@@ -261,4 +296,4 @@ bool ZipFileSystem::ListFiles(
     "ZIP directory listing is not supported yet");
 }
 
-}
+}  // namespace sdb::connector

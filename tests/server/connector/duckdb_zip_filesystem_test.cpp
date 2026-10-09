@@ -1,3 +1,23 @@
+////////////////////////////////////////////////////////////////////////////////
+/// DISCLAIMER
+///
+/// Copyright 2026 SereneDB GmbH, Berlin, Germany
+///
+/// Licensed under the Apache License, Version 2.0 (the "License");
+/// you may not use this file except in compliance with the License.
+/// You may obtain a copy of the License at
+///
+///     http://www.apache.org/licenses/LICENSE-2.0
+///
+/// Unless required by applicable law or agreed to in writing, software
+/// distributed under the License is distributed on an "AS IS" BASIS,
+/// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+/// See the License for the specific language governing permissions and
+/// limitations under the License.
+///
+/// Copyright holder is SereneDB GmbH, Berlin, Germany
+////////////////////////////////////////////////////////////////////////////////
+
 #include <gtest/gtest.h>
 #include <sys/stat.h>
 
@@ -9,7 +29,8 @@
 #include <thread>
 
 #include "connector/duckdb_zip_filesystem.hpp"
-#include "zip_fixture.hpp"
+#include "iresearch/utils/pg/sql_exception.hpp"
+#include "zip_fixture.h"
 
 namespace {
 
@@ -75,10 +96,10 @@ TEST_F(ZipFileSystemTest, ConcurrentReadsAndIndependentHandles) {
     for (auto& thread : threads) {
       thread.join();
     }
-    EXPECT_THROW(zip->Read(*file, nullptr, -1), duckdb::IOException);
+    EXPECT_THROW(zip->Read(*file, nullptr, -1), irs::SqlException);
     file->Close();
     file->Close();
-    EXPECT_THROW(zip->Seek(*file, 0), duckdb::IOException);
+    EXPECT_THROW(zip->Seek(*file, 0), irs::SqlException);
     std::array<char, 5> buffer;
     EXPECT_EQ(zip->Read(*other, buffer.data(), buffer.size()), 5);
     EXPECT_EQ(std::string(buffer.data(), buffer.size()), "other");
@@ -92,7 +113,7 @@ TEST_F(ZipFileSystemTest, MissingForbiddenAndReadOnly) {
   EXPECT_FALSE(zip->FileExists(prefix + "absent", &opener));
   EXPECT_TRUE(zip->FileExists(prefix + "data", &opener));
   EXPECT_EQ(zip->Glob(prefix + "data", &opener).size(), 1);
-  EXPECT_THROW(zip->Glob(prefix + "../data", &opener), duckdb::IOException);
+  EXPECT_THROW(zip->Glob(prefix + "../data", &opener), irs::SqlException);
   const auto relative =
     std::filesystem::relative(directory + "/data.zip").string();
   EXPECT_TRUE(zip->FileExists("zip://" + relative + "/data", &opener));
@@ -108,11 +129,11 @@ TEST_F(ZipFileSystemTest, MissingForbiddenAndReadOnly) {
                duckdb::NotImplementedException);
   EXPECT_THROW(
     zip->OpenFile(prefix + "data", duckdb::FileFlags::FILE_FLAGS_READ, nullptr),
-    duckdb::IOException);
+    irs::SqlException);
   auto result = connection.Query("SET enable_external_access=false");
   result->Complete();
   ASSERT_FALSE(result->HasError()) << result->GetError();
-  EXPECT_THROW(Open(prefix + "data"), duckdb::PermissionException);
+  EXPECT_THROW(Open(prefix + "data"), irs::SqlException);
 }
 
 TEST_F(ZipFileSystemTest, CancellationAndCorruptionReachCaller) {
@@ -131,7 +152,7 @@ TEST_F(ZipFileSystemTest, CancellationAndCorruptionReachCaller) {
     std::filesystem::resize_file(directory + "/data.zip", 10);
     std::array<char, 10> buffer;
     EXPECT_THROW(zip->Read(*file, buffer.data(), buffer.size()),
-                 duckdb::IOException);
+                 irs::SqlException);
   }
 
   {
@@ -139,7 +160,7 @@ TEST_F(ZipFileSystemTest, CancellationAndCorruptionReachCaller) {
     file << "not an archive";
   }
   EXPECT_THROW(zip->FileExists("zip://" + directory + "/bad.zip/data", &opener),
-               duckdb::IOException);
+               irs::SqlException);
 }
 
 TEST_F(ZipFileSystemTest, CsvJsonAndParquetQueries) {
@@ -221,4 +242,4 @@ TEST_F(ZipFileSystemTest, SqlErrorsReachCaller) {
   EXPECT_NE(invalid->GetError().find("CRC"), std::string::npos);
 }
 
-}
+}  // namespace
