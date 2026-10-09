@@ -1,23 +1,3 @@
-////////////////////////////////////////////////////////////////////////////////
-/// DISCLAIMER
-///
-/// Copyright 2026 SereneDB GmbH, Berlin, Germany
-///
-/// Licensed under the Apache License, Version 2.0 (the "License");
-/// you may not use this file except in compliance with the License.
-/// You may obtain a copy of the License at
-///
-///     http://www.apache.org/licenses/LICENSE-2.0
-///
-/// Unless required by applicable law or agreed to in writing, software
-/// distributed under the License is distributed on an "AS IS" BASIS,
-/// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-/// See the License for the specific language governing permissions and
-/// limitations under the License.
-///
-/// Copyright holder is SereneDB GmbH, Berlin, Germany
-////////////////////////////////////////////////////////////////////////////////
-
 #include <gtest/gtest.h>
 #include <sys/stat.h>
 
@@ -35,7 +15,6 @@ namespace {
 
 class ZipFileSystemTest : public testing::Test {
  protected:
-  // Создаёт тестовую базу, регистрирует ZIP FS и выделяет временный каталог.
   ZipFileSystemTest()
     : database{nullptr}, connection{database}, opener{*connection.context} {
     auto fs = duckdb::make_uniq<sdb::connector::ZipFileSystem>();
@@ -48,10 +27,8 @@ class ZipFileSystemTest : public testing::Test {
     }
     directory = path;
   }
-  // Удаляет временный каталог и созданные тестом файлы.
   ~ZipFileSystemTest() override { std::filesystem::remove_all(directory); }
 
-  // Записывает тестовый ZIP и возвращает префикс путей его файлов.
   std::string Write(const std::vector<zip_test::Entry>& entries) {
     zip_test::Archive archive{entries};
     const auto path = directory + "/data.zip";
@@ -60,7 +37,6 @@ class ZipFileSystemTest : public testing::Test {
     file.close();
     return "zip://" + path + "/";
   }
-  // Открывает файл ZIP на чтение с контекстом тестовой базы.
   duckdb::unique_ptr<duckdb::FileHandle> Open(const std::string& path) {
     return zip->OpenFile(path, duckdb::FileFlags::FILE_FLAGS_READ, &opener);
   }
@@ -72,7 +48,6 @@ class ZipFileSystemTest : public testing::Test {
   std::string directory;
 };
 
-// Проверяет параллельные чтения одного handle и независимость разных handles.
 TEST_F(ZipFileSystemTest, ConcurrentReadsAndIndependentHandles) {
   std::string data;
   for (size_t i = 0; i < 300000; ++i) {
@@ -85,7 +60,6 @@ TEST_F(ZipFileSystemTest, ConcurrentReadsAndIndependentHandles) {
     auto other = Open(prefix + "other");
     std::vector<std::thread> threads;
     for (size_t thread = 0; thread < 4; ++thread) {
-      // Каждый поток проверяет собственные диапазоны на одном общем handle.
       threads.emplace_back([&, thread] {
         std::array<char, 113> buffer;
         for (size_t i = 0; i < 10; ++i) {
@@ -113,7 +87,6 @@ TEST_F(ZipFileSystemTest, ConcurrentReadsAndIndependentHandles) {
   }
 }
 
-// Проверяет наличие файлов, локальность, права доступа и режим только чтения.
 TEST_F(ZipFileSystemTest, MissingForbiddenAndReadOnly) {
   auto prefix = Write({{"data", "abc"}});
   EXPECT_FALSE(zip->FileExists(prefix + "absent", &opener));
@@ -142,7 +115,6 @@ TEST_F(ZipFileSystemTest, MissingForbiddenAndReadOnly) {
   EXPECT_THROW(Open(prefix + "data"), duckdb::PermissionException);
 }
 
-// Проверяет передачу отмены и ошибок изменения или повреждения архива.
 TEST_F(ZipFileSystemTest, CancellationAndCorruptionReachCaller) {
   const auto prefix = Write({{"data", std::string(1024 * 1024, 'a')}});
   {
@@ -170,7 +142,6 @@ TEST_F(ZipFileSystemTest, CancellationAndCorruptionReachCaller) {
                duckdb::IOException);
 }
 
-// Сравнивает SQL-чтение CSV, JSON и Parquet для Store и DEFLATE.
 TEST_F(ZipFileSystemTest, CsvJsonAndParquetQueries) {
   const auto parquet_path = directory + "/original.parquet";
   auto generated = connection.Query(
@@ -235,7 +206,6 @@ TEST_F(ZipFileSystemTest, CsvJsonAndParquetQueries) {
   }
 }
 
-// Проверяет, что ошибка CRC файла ZIP видна SQL-клиенту.
 TEST_F(ZipFileSystemTest, SqlErrorsReachCaller) {
   const auto prefix = Write({{"data.csv", "id,value\n1,2\n"}});
   zip_test::Archive corrupt{{{"data.csv", "id,value\n1,2\n", 0}}};
@@ -251,4 +221,4 @@ TEST_F(ZipFileSystemTest, SqlErrorsReachCaller) {
   EXPECT_NE(invalid->GetError().find("CRC"), std::string::npos);
 }
 
-}  // namespace
+}

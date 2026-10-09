@@ -1,7 +1,5 @@
 add_executable(
     serenedb-tests
-    # Custom main (NOT gtest_main): brings up DuckDBEngine before any
-    # SDB_* macro fires -- see tests_main.cpp comment.
     tests_main.cpp
     assertions_tests.cpp
     database_directory_test.cpp

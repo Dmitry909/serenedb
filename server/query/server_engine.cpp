@@ -1,23 +1,3 @@
-////////////////////////////////////////////////////////////////////////////////
-/// DISCLAIMER
-///
-/// Copyright 2026 SereneDB GmbH, Berlin, Germany
-///
-/// Licensed under the Apache License, Version 2.0 (the "License");
-/// you may not use this file except in compliance with the License.
-/// You may obtain a copy of the License at
-///
-///     http://www.apache.org/licenses/LICENSE-2.0
-///
-/// Unless required by applicable law or agreed to in writing, software
-/// distributed under the License is distributed on an "AS IS" BASIS,
-/// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-/// See the License for the specific language governing permissions and
-/// limitations under the License.
-///
-/// Copyright holder is SereneDB GmbH, Berlin, Germany
-////////////////////////////////////////////////////////////////////////////////
-
 #include "query/server_engine.h"
 
 #include <absl/flags/declare.h>
@@ -72,10 +52,7 @@
 
 extern "C" const duckdb::DefaultType* duckdb_external_types(
   duckdb::idx_t* count) {
-  // Lazy-initialized to avoid static initialization order issues
-  // (LogicalType has shared_ptr that needs heap allocation).
   static const duckdb::DefaultType kExternalTypes[] = {
-    // reg* types -- aliased BIGINT with input functions for catalog lookups
     {
       "regclass",
       sdb::pg::REGCLASS(),
@@ -131,13 +108,11 @@ extern "C" const duckdb::DefaultType* duckdb_external_types(
       sdb::pg::REGCOLLATION(),
       nullptr,
     },
-    // oid -- overrides DuckDB builtin (plain BIGINT) with aliased BIGINT
     {
       "oid",
       sdb::pg::OID(),
       nullptr,
     },
-    // System identifier types -- aliased BIGINT
     {
       "tid",
       sdb::pg::TID(),
@@ -158,20 +133,17 @@ extern "C" const duckdb::DefaultType* duckdb_external_types(
       sdb::pg::XID8(),
       nullptr,
     },
-    // PG name type
     {
       "name",
       sdb::pg::NAME(),
       nullptr,
     },
-    // PG composite type used as cast target in pg_stats_ext_exprs view.
     {
       "pg_statistic",
       sdb::pg::SystemTable<sdb::pg::PgStatistic>{}.RowType().WithAlias(
         "pg_statistic"),
       nullptr,
     },
-    // information_schema types, TODO(mbkkt) move this to namespace
     {
       "cardinal_number",
       sdb::pg::CARDINALNUMBER(),
@@ -197,7 +169,6 @@ extern "C" const duckdb::DefaultType* duckdb_external_types(
       sdb::pg::YESORNO(),
       nullptr,
     },
-    // pseudo-types for SERIAL types.
     {
       "serial",
       sdb::pg::SERIAL(),
@@ -213,7 +184,6 @@ extern "C" const duckdb::DefaultType* duckdb_external_types(
       sdb::pg::SMALLSERIAL(),
       nullptr,
     },
-    // PG pseudo-type used in RETURNS VOID; backed by SQLNULL.
     {
       "void",
       sdb::pg::VOID(),
@@ -243,9 +213,6 @@ ABSL_DECLARE_FLAG(std::string, server_directory);
 namespace sdb::server::query {
 
 void ConfigureServerDBConfig(duckdb::DBConfig& config) {
-  // Server-mode DuckDB state lives under the datadir, never in cwd-relative
-  // temp files or ~/.duckdb fallbacks (shell/psql subcommands return before
-  // this mutator runs and keep DuckDB defaults).
   const auto datadir =
     lifecycle::ResolveDataDir(absl::GetFlag(FLAGS_server_directory));
   auto layout = duckdb::make_shared_ptr<catalog::DataDirectory>(datadir);
@@ -262,16 +229,10 @@ void ConfigureServerDBConfig(duckdb::DBConfig& config) {
   config.SetOptionByName(
     "extension_directory",
     duckdb::Value{utils::file_utils::BuildFilename(datadir, "extensions")});
-  // Dependency edges are built from what the binder resolved
-  // (CreateInfo::dependencies), so the collection must be on for every bind.
   config.SetOptionByName("enable_view_dependencies",
                          duckdb::Value::BOOLEAN(true));
   config.SetOptionByName("enable_macro_dependencies",
                          duckdb::Value::BOOLEAN(true));
-  // DuckDB's own auto-detect uses std::thread::hardware_concurrency(), which
-  // ignores cgroup CPU limits and would over-thread in a container. Pin it to
-  // our cgroup-aware logical core count when unset, and publish the resolved
-  // value into the flag.
   auto threads = absl::GetFlag(FLAGS_cpu_threads);
   if (threads == 0) {
     threads = CountLogicalCores();
@@ -283,25 +244,11 @@ void ConfigureServerDBConfig(duckdb::DBConfig& config) {
     config.SetOptionByName(duckdb::Identifier{kRecoveryReplayDepthSetting},
                            duckdb::Value::UINTEGER(depth));
   }
-  // serenedb runs every query on the internal pool (sessions are scheduled as
-  // tasks; the driver is itself a pool worker), so there is no external thread
-  // feeding the scheduler. Default external_threads=1 would over-count
-  // parallelism by one and make `threads`/`cpu_threads` resolve to N-1 internal
-  // workers; zero makes the count exact and `threads=1` a true single worker.
-  // Sessions run as tasks on that pool, so it must never be left empty; the
-  // value is refused for the lifetime of the process (kUnchangeableSettings in
-  // connector/duckdb_client_state.cpp), which is what keeps `threads -
-  // external_threads` from ever resolving to zero internal workers.
   config.SetOptionByName("external_threads", duckdb::Value::UBIGINT(0));
   config.SetOptionByName("scheduler_process_partial",
                          duckdb::Value::BOOLEAN(true));
-  // PostgreSQL's COPY ... TO writes no CSV header unless HEADER is given;
-  // DuckDB's writer defaults it on.
   config.SetOptionByName("copy_csv_header_default",
                          duckdb::Value::BOOLEAN(false));
-  // `/` between two integers truncates in PostgreSQL, where DuckDB produces a
-  // DOUBLE. A client that wants DuckDB's reading can still SET this back per
-  // session.
   config.SetOptionByName("integer_division", duckdb::Value::BOOLEAN(true));
   config.SetOptionByName("show_behavior", duckdb::Value("SETTING"));
   config.SetOptionByName("autoinstall_known_extensions",
@@ -363,24 +310,17 @@ void RegisterServerExtensions(duckdb::DatabaseInstance& db) {
 
   connector::RegisterSereneDBOptimizers(db);
 
-  // The inverted index: its build plan and its store-side instance are
-  // serenedb's. A plain CREATE INDEX is duckdb's ART end to end -- the bind
-  // normalizes every non-inverted spelling to it.
   auto& index_types = db.config.GetIndexTypes();
   index_types.RegisterIndexType(
     connector::InvertedStoreIndex::GetInvertedIndexType());
 
-  // Register filesystem for COPY FROM STDIN support.
-  // Intercepts "/dev/stdin" and reads from PG CopyData messages.
   auto& fs = duckdb::FileSystem::GetFileSystem(db);
   fs.RegisterSubSystem(duckdb::make_uniq<connector::SereneDBCopyFileSystem>());
   fs.RegisterSubSystem(duckdb::make_uniq<connector::ZipFileSystem>());
 
-  // Parse and cache system functions/views for serving from our attached
-  // catalog.
   auto parser = duckdb::Parser::GetBuiltinParser();
   pg::InitSystemFunctions(parser);
   pg::InitSystemViews(parser);
 }
 
-}  // namespace sdb::server::query
+}

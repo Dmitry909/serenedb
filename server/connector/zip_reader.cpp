@@ -1,23 +1,3 @@
-////////////////////////////////////////////////////////////////////////////////
-/// DISCLAIMER
-///
-/// Copyright 2026 SereneDB GmbH, Berlin, Germany
-///
-/// Licensed under the Apache License, Version 2.0 (the "License");
-/// you may not use this file except in compliance with the License.
-/// You may obtain a copy of the License at
-///
-///     http://www.apache.org/licenses/LICENSE-2.0
-///
-/// Unless required by applicable law or agreed to in writing, software
-/// distributed under the License is distributed on an "AS IS" BASIS,
-/// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-/// See the License for the specific language governing permissions and
-/// limitations under the License.
-///
-/// Copyright holder is SereneDB GmbH, Berlin, Germany
-////////////////////////////////////////////////////////////////////////////////
-
 #include "connector/zip_reader.hpp"
 
 #include <algorithm>
@@ -32,12 +12,10 @@ namespace {
 constexpr size_t kChunk = 64 * 1024;
 constexpr uint32_t kMax32 = UINT32_MAX;
 
-// Сообщает о повреждённой или недопустимой структуре ZIP.
 [[noreturn]] void Invalid(const char* message) {
   throw Error{ErrorKind::Invalid, message};
 }
 
-// Читает целое число little-endian из проверенного диапазона байтов.
 uint64_t Number(std::span<const std::byte> bytes, size_t offset, size_t width) {
   if (offset > bytes.size() || width > bytes.size() - offset) {
     Invalid("Truncated ZIP header");
@@ -49,14 +27,12 @@ uint64_t Number(std::span<const std::byte> bytes, size_t offset, size_t width) {
   return value;
 }
 
-// Проверяет границы диапазона без переполнения при сложении.
 void Range(uint64_t offset, uint64_t length, uint64_t end) {
   if (offset > end || length > end - offset) {
     Invalid("ZIP range exceeds file bounds");
   }
 }
 
-// Проверяет корректность UTF-8 без выделения дополнительной памяти.
 bool Utf8(std::string_view text) {
   size_t pos = 0;
   while (pos < text.size()) {
@@ -100,7 +76,6 @@ bool Utf8(std::string_view text) {
   return true;
 }
 
-// Отклоняет опасные, пустые и неподдерживаемые имена внутри архива.
 void ValidateName(std::string_view name) {
   if (name.empty() || name.front() == '/' || name.find('\0') != name.npos ||
       name.find('\\') != name.npos || name.find(':') != name.npos ||
@@ -125,7 +100,6 @@ void ValidateName(std::string_view name) {
   }
 }
 
-// Убирает компоненты «.» и повторные разделители из допустимого имени.
 std::string Normalize(std::string_view name) {
   ValidateName(name);
   std::string result;
@@ -146,7 +120,6 @@ std::string Normalize(std::string_view name) {
   return result;
 }
 
-// Получает расширенные размеры и смещения из extra field ZIP64.
 void Zip64(std::span<const std::byte> extra, uint64_t& size,
            uint64_t& compressed, uint64_t& offset, uint64_t& disk) {
   bool found = false;
@@ -181,7 +154,6 @@ void Zip64(std::span<const std::byte> extra, uint64_t& size,
   }
 }
 
-// Сравнивает компоненты путей так, чтобы каталог и его потомки шли подряд.
 bool NameLess(std::string_view lhs, std::string_view rhs) {
   while (true) {
     const auto lslash = lhs.find('/');
@@ -201,7 +173,6 @@ bool NameLess(std::string_view lhs, std::string_view rhs) {
 
 class CentralDirectory {
  public:
-  // Выбирает хранение каталога в памяти либо чтение с диска по порогу 50 MiB.
   CentralDirectory(Source& source, uint64_t offset, uint64_t size)
     : _source{source}, _offset{offset}, _size{size} {
     if (size <= kMetadataCacheLimit) {
@@ -215,7 +186,6 @@ class CentralDirectory {
     }
   }
 
-  // Читает диапазон каталога из кеша или внешнего файла, проверяя отмену.
   void Read(uint64_t offset, std::span<std::byte> output) {
     _source.Check();
     Range(offset, output.size(), _offset + _size);
@@ -230,10 +200,8 @@ class CentralDirectory {
     }
   }
 
-  // Сохраняет смещение очередной записи каталога для проверки имён.
   void Add(uint64_t offset) { _entries.push_back(offset); }
 
-  // Сортирует смещения по именам и отклоняет дубликаты и конфликты каталогов.
   void ValidateNames() {
     std::sort(_entries.begin(), _entries.end(),
               [&](uint64_t lhs, uint64_t rhs) {
@@ -254,7 +222,6 @@ class CentralDirectory {
   }
 
  private:
-  // Читает нормализованное имя и признак каталога по смещению записи.
   std::pair<std::string, bool> NameAt(uint64_t offset) {
     std::array<std::byte, 46> header;
     Read(offset, header);
@@ -273,13 +240,11 @@ class CentralDirectory {
   const uint64_t _offset;
   const uint64_t _size;
   std::vector<std::byte> _cache;
-  // Для большого каталога храним только смещения, а не все имена.
   std::vector<uint64_t> _entries;
 };
 
-}  // namespace
+}
 
-// Разделяет точный локальный путь ZIP на путь архива и имя файла.
 Path ParsePath(std::string_view path) {
   if (!path.starts_with("zip://")) {
     Invalid("ZIP path must start with zip://");
@@ -309,11 +274,9 @@ Path ParsePath(std::string_view path) {
   return result;
 }
 
-// Находит выбранный файл и создаёт reader без распаковки его содержимого.
 Reader::Reader(Source& source, std::string_view member)
   : Reader{source, FindEntry(source, member)} {}
 
-// Создаёт reader по уже проверенным размерам, смещению, методу и CRC.
 Reader::Reader(Source& source, const EntryInfo& entry)
   : _source{source},
     _size{entry.size},
@@ -322,10 +285,8 @@ Reader::Reader(Source& source, const EntryInfo& entry)
     _expected_crc{entry.crc},
     _method{entry.method} {}
 
-// Освобождает декодер без дочитывания файла и проверки оставшегося CRC.
 Reader::~Reader() noexcept { Stop(); }
 
-// Проверяет ZIP/ZIP64 и возвращает метаданные единственного выбранного файла.
 EntryInfo FindEntry(Source& source, std::string_view member) {
   EntryInfo entry_info{};
   source.Check();
@@ -520,7 +481,6 @@ EntryInfo FindEntry(Source& source, std::string_view member) {
                entry_info.compressed_size &&
              Number(descriptor, prefix + 4 + width, width) == entry_info.size;
     };
-    // CRC файла может совпадать с необязательной сигнатурой descriptor.
     if (!matches(0) &&
         !(Number(descriptor, 0, 4) == 0x08074b50 && matches(4))) {
       Invalid("ZIP data descriptor disagrees with central directory");
@@ -532,7 +492,6 @@ EntryInfo FindEntry(Source& source, std::string_view member) {
   return entry_info;
 }
 
-// Освобождает активное состояние zlib и помечает декодер остановленным.
 void Reader::Stop() noexcept {
   if (_started) {
     inflateEnd(&_stream);
@@ -540,7 +499,6 @@ void Reader::Stop() noexcept {
   }
 }
 
-// Создаёт raw DEFLATE-декодер и сбрасывает состояние прохода по файлу.
 void Reader::Start() {
   Stop();
   _input.resize(kChunk);
@@ -558,7 +516,6 @@ void Reader::Start() {
   _verified = false;
 }
 
-// Проверяет состояние reader, отмену и неизменность внешнего архива.
 void Reader::CheckState() {
   if (_failed) {
     Invalid("ZIP reader is in failed state; reopen the file");
@@ -566,7 +523,6 @@ void Reader::CheckState() {
   _source.Check();
 }
 
-// Декодирует очередную порцию и проверяет размер, прогресс и конец потока.
 size_t Reader::Inflate(std::span<std::byte> output) {
   _source.Check();
   if (!_stream.avail_in && _loaded < _compressed_size) {
@@ -606,7 +562,6 @@ size_t Reader::Inflate(std::span<std::byte> output) {
   return produced;
 }
 
-// Доводит декодер до нужной позиции, отбрасывая данные фиксированными порциями.
 void Reader::Advance(uint64_t target) {
   if (!_started || target < _decoded) {
     Start();
@@ -620,7 +575,6 @@ void Reader::Advance(uint64_t target) {
   }
 }
 
-// Проверяет завершение полного прохода, размеры потока и CRC.
 void Reader::Finish() {
   if (_method == 8 && !_verified) {
     if (!_started) {
@@ -636,7 +590,6 @@ void Reader::Finish() {
   }
 }
 
-// Читает Store или DEFLATE в буфер вызывающего кода и продвигает позицию.
 size_t Reader::Read(std::span<std::byte> output) {
   try {
     CheckState();
@@ -677,7 +630,6 @@ size_t Reader::Read(std::span<std::byte> output) {
   }
 }
 
-// Устанавливает логическую позицию, откладывая распаковку до чтения.
 void Reader::Seek(uint64_t offset) {
   CheckState();
   Range(offset, 0, _size);
@@ -689,11 +641,10 @@ void Reader::Seek(uint64_t offset) {
   }
 }
 
-// Читает ровно заданный диапазон через установку позиции и обычное чтение.
 void Reader::ReadAt(uint64_t offset, std::span<std::byte> output) {
   Range(offset, output.size(), _size);
   Seek(offset);
   Read(output);
 }
 
-}  // namespace sdb::connector::zip
+}

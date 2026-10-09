@@ -1,23 +1,3 @@
-////////////////////////////////////////////////////////////////////////////////
-/// DISCLAIMER
-///
-/// Copyright 2026 SereneDB GmbH, Berlin, Germany
-///
-/// Licensed under the Apache License, Version 2.0 (the "License");
-/// you may not use this file except in compliance with the License.
-/// You may obtain a copy of the License at
-///
-///     http://www.apache.org/licenses/LICENSE-2.0
-///
-/// Unless required by applicable law or agreed to in writing, software
-/// distributed under the License is distributed on an "AS IS" BASIS,
-/// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-/// See the License for the specific language governing permissions and
-/// limitations under the License.
-///
-/// Copyright holder is SereneDB GmbH, Berlin, Germany
-////////////////////////////////////////////////////////////////////////////////
-
 #include <gtest/gtest.h>
 
 #include <random>
@@ -31,11 +11,8 @@ using sdb::connector::zip::Error;
 using sdb::connector::zip::Reader;
 
 struct Source final : sdb::connector::zip::Source {
-  // Создаёт тестовый источник над байтами архива без их копирования.
   explicit Source(const std::string& bytes) : bytes{bytes} {}
-  // Возвращает размер тестового архива.
   uint64_t Size() const final { return bytes.size(); }
-  // Копирует диапазон архива и учитывает объём и максимальную порцию чтения.
   void ReadAt(uint64_t offset, std::span<std::byte> output) final {
     if (offset > bytes.size() || output.size() > bytes.size() - offset) {
       throw std::runtime_error{"short source"};
@@ -44,7 +21,6 @@ struct Source final : sdb::connector::zip::Source {
     read += output.size();
     largest_read = std::max(largest_read, output.size());
   }
-  // Имитирует отмену после заданного числа проверок.
   void Check() final {
     if (cancel_after && ++checks >= cancel_after) {
       throw std::runtime_error{"cancelled"};
@@ -57,7 +33,6 @@ struct Source final : sdb::connector::zip::Source {
   size_t cancel_after = 0;
 };
 
-// Собирает полный результат reader маленькими порциями для сравнения в тестах.
 std::string ReadAll(Reader& reader) {
   std::string result;
   std::array<std::byte, 113> buffer;
@@ -67,7 +42,6 @@ std::string ReadAll(Reader& reader) {
   return result;
 }
 
-// Проверяет методы, ZIP64, descriptors, чтение диапазонов и повторный проход.
 TEST(ZipReader, StoreDeflateZip64AndDescriptors) {
   std::string input;
   for (size_t i = 0; i < 200000; ++i) {
@@ -103,7 +77,6 @@ TEST(ZipReader, StoreDeflateZip64AndDescriptors) {
   }
 }
 
-// Проверяет пустые файлы и отсутствие выбранного файла.
 TEST(ZipReader, EmptyAndMissingMembers) {
   for (auto method : {0, 8}) {
     zip_test::Archive archive{{{"empty", "", uint16_t(method)}}};
@@ -119,7 +92,6 @@ TEST(ZipReader, EmptyAndMissingMembers) {
   EXPECT_THROW((Reader{source, "missing"}), Error);
 }
 
-// Проверяет отказ для опасных имён, дубликатов, конфликтов и symlink.
 TEST(ZipReader, RejectsDangerousAndAmbiguousNames) {
   for (auto name :
        {"../evil", "/absolute", "C:/file", "a/../../file", "a\\file"}) {
@@ -144,10 +116,9 @@ TEST(ZipReader, RejectsDangerousAndAmbiguousNames) {
   EXPECT_THROW((Reader{source, "good"}), Error);
 }
 
-// Проверяет длинные UTF-8 имена, нормализацию и метод другой записи.
 TEST(ZipReader, FullNamesNormalizationAndUnsupportedUnselectedMethod) {
   std::string name(600, 'x');
-  name += "/данные.csv";
+  name += "/café.csv";
   zip_test::Archive archive{{{name, "ok"},
                              {"other", "opaque", 99},
                              {"folder/", "", 0},
@@ -161,7 +132,6 @@ TEST(ZipReader, FullNamesNormalizationAndUnsupportedUnselectedMethod) {
   EXPECT_THROW((Reader{source, "FOLDER/x"}), Error);
 }
 
-// Проверяет повреждение CRC, заголовков и размеров и состояние после ошибки.
 TEST(ZipReader, CorruptionAndTerminalError) {
   for (auto method : {0, 8}) {
     zip_test::Archive archive{{{"data", "hello world", uint16_t(method)}}};
@@ -191,7 +161,6 @@ TEST(ZipReader, CorruptionAndTerminalError) {
   }
 }
 
-// Проверяет отмену во время распаковки пропускаемого префикса.
 TEST(ZipReader, CancellationDuringSeek) {
   zip_test::Archive archive{{{"data", std::string(1024 * 1024, 'a')}}};
   Source source{archive.bytes};
@@ -201,7 +170,6 @@ TEST(ZipReader, CancellationDuringSeek) {
   EXPECT_THROW(ReadAll(reader), std::runtime_error);
 }
 
-// Проверяет ленивое открытие и отсутствие дочитывания при закрытии.
 TEST(ZipReader, BoundedBuffersAndLazyRead) {
   for (auto method : {0, 8}) {
     zip_test::Archive archive{
@@ -221,7 +189,6 @@ TEST(ZipReader, BoundedBuffersAndLazyRead) {
   }
 }
 
-// Проверяет допустимые пути, удалённые URI и ошибки синтаксиса.
 TEST(ZipReader, PathSyntax) {
   using sdb::connector::zip::ParsePath;
   EXPECT_EQ(ParsePath("zip://a.zip/dir/a.csv").member, "dir/a.csv");
@@ -234,7 +201,6 @@ TEST(ZipReader, PathSyntax) {
   }
 }
 
-// Проверяет усечение архива и случайные мутации заголовков.
 TEST(ZipReader, TruncationAndMutatedHeaders) {
   const zip_test::Archive original{
     {{"data", std::string(1024, 'a')}}, true, true};
@@ -258,7 +224,6 @@ TEST(ZipReader, TruncationAndMutatedHeaders) {
   }
 }
 
-// Проверяет лишние сжатые байты и повреждённый DEFLATE, включая пустой файл.
 TEST(ZipReader, RejectsTrailingCompressedBytesAndInvalidEmptyStream) {
   for (const auto& data : {std::string{}, std::string{"abc"}}) {
     zip_test::Archive archive{{{"data", data}}};
@@ -284,7 +249,6 @@ TEST(ZipReader, RejectsTrailingCompressedBytesAndInvalidEmptyStream) {
   EXPECT_THROW(ReadAll(reader), Error);
 }
 
-// Проверяет границу 50 MiB, чтение по смещениям и дубликаты в обоих режимах.
 TEST(ZipReader, MetadataCacheThresholdAndDiskOffsets) {
   using sdb::connector::zip::kMetadataCacheLimit;
   for (const auto size : {kMetadataCacheLimit - 1, kMetadataCacheLimit,
@@ -310,8 +274,6 @@ TEST(ZipReader, MetadataCacheThresholdAndDiskOffsets) {
       if (size <= kMetadataCacheLimit) {
         EXPECT_GE(source.read, size);
       } else {
-        // В дисковом режиме комментарии пропускаются, а записи читаются
-        // поштучно.
         EXPECT_LT(source.read, size / 2);
       }
       EXPECT_LE(source.largest_read, 65535 + 22);
@@ -323,8 +285,6 @@ TEST(ZipReader, MetadataCacheThresholdAndDiskOffsets) {
   }
 }
 
-// Проверяет конфликты имён, которые не соседствуют при обычной сортировке
-// строк.
 TEST(ZipReader, ComponentOrderingDetectsNonAdjacentFileConflicts) {
   for (const auto& entries : {
          std::vector<zip_test::Entry>{{"a", ""}, {"a!", ""}, {"a/b", ""}},
@@ -337,4 +297,4 @@ TEST(ZipReader, ComponentOrderingDetectsNonAdjacentFileConflicts) {
   }
 }
 
-}  // namespace
+}
