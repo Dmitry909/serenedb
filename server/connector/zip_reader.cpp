@@ -29,6 +29,16 @@
 namespace sdb::connector::zip {
 namespace {
 
+struct EntryInfo {
+  uint64_t size;
+  uint64_t compressed_size;
+  uint64_t data_offset;
+  uint32_t crc;
+  uint16_t method;
+};
+
+EntryInfo FindEntry(Source& source, std::string_view member);
+
 constexpr size_t kChunk = 64 * 1024;
 constexpr uint32_t kMax32 = UINT32_MAX;
 
@@ -294,18 +304,18 @@ Path ParsePath(std::string_view path) {
   return result;
 }
 
-Reader::Reader(Source& source, std::string_view member)
-  : Reader{source, FindEntry(source, member)} {}
-
-Reader::Reader(Source& source, const EntryInfo& entry)
-  : _source{source},
-    _size{entry.size},
-    _compressed_size{entry.compressed_size},
-    _data_offset{entry.data_offset},
-    _expected_crc{entry.crc},
-    _method{entry.method} {}
+Reader::Reader(Source& source, std::string_view member) : _source{source} {
+  const auto entry = FindEntry(source, member);
+  _size = entry.size;
+  _compressed_size = entry.compressed_size;
+  _data_offset = entry.data_offset;
+  _expected_crc = entry.crc;
+  _method = entry.method;
+}
 
 Reader::~Reader() noexcept { Stop(); }
+
+namespace {
 
 EntryInfo FindEntry(Source& source, std::string_view member) {
   EntryInfo entry_info{};
@@ -511,6 +521,8 @@ EntryInfo FindEntry(Source& source, std::string_view member) {
   }
   return entry_info;
 }
+
+}  // namespace
 
 void Reader::Stop() noexcept {
   if (_started) {

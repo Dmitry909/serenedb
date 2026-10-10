@@ -96,7 +96,7 @@ class ZipHandle final : public duckdb::FileHandle {
             std::string_view member)
     : FileHandle{fs, path, flags},
       source{std::move(local), std::move(file), client},
-      reader{std::in_place, source, zip::FindEntry(source, member)} {}
+      reader{std::in_place, source, member} {}
   ~ZipHandle() noexcept final { Close(); }
   void Close() final {
     std::lock_guard lock{mutex};
@@ -241,8 +241,6 @@ void ZipFileSystem::Seek(duckdb::FileHandle& handle, duckdb::idx_t offset) {
   }
 }
 
-void ZipFileSystem::Reset(duckdb::FileHandle& handle) { Seek(handle, 0); }
-
 duckdb::idx_t ZipFileSystem::SeekPosition(duckdb::FileHandle& handle) {
   auto& zip = handle.Cast<ZipHandle>();
   std::lock_guard lock{zip.mutex};
@@ -286,14 +284,6 @@ duckdb::vector<duckdb::OpenFileInfo> ZipFileSystem::Glob(
                     ERR_MSG("ZIP allocation failed"));
   }
   return {duckdb::OpenFileInfo{path}};
-}
-
-bool ZipFileSystem::ListFiles(
-  const std::string& path,
-  const std::function<void(const std::string&, bool)>& callback,
-  duckdb::FileOpener* opener) {
-  throw duckdb::NotImplementedException(
-    "ZIP directory listing is not supported yet");
 }
 
 }  // namespace sdb::connector

@@ -61,27 +61,15 @@ class Source {
 
 inline constexpr size_t kMetadataCacheLimit = 50 * 1024 * 1024;
 
-struct EntryInfo {
-  uint64_t size;
-  uint64_t compressed_size;
-  uint64_t data_offset;
-  uint32_t crc;
-  uint16_t method;
-};
-
-EntryInfo FindEntry(Source& source, std::string_view member);
-
 class Reader {
  public:
   Reader(Source& source, std::string_view member);
-  Reader(Source& source, const EntryInfo& entry);
   ~Reader() noexcept;
   Reader(const Reader&) = delete;
   Reader& operator=(const Reader&) = delete;
 
   uint64_t Size() const { return _size; }
   uint64_t Position() const { return _position; }
-  bool Compressed() const { return _method == 8; }
   size_t Read(std::span<std::byte> output);
   void ReadAt(uint64_t offset, std::span<std::byte> output);
   void Seek(uint64_t offset);
