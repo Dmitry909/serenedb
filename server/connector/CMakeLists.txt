@@ -42,7 +42,7 @@ target_sources(
         view_fast_path.cpp
         view_index_bind.cpp
         duckdb_copy_filesystem.cpp
-        duckdb_zip_filesystem.cpp
+        zip_filesystem.cpp
         zip_reader.cpp
         duckdb_physical_search_delete.cpp
         duckdb_physical_search_insert.cpp

@@ -25,7 +25,6 @@
 #include <array>
 #include <cstdint>
 #include <span>
-#include <stdexcept>
 #include <string_view>
 #include <vector>
 
@@ -33,19 +32,6 @@ namespace sdb::connector::zip {
 
 inline constexpr uint16_t kStore = 0;
 inline constexpr uint16_t kDeflate = 8;
-
-enum class ErrorKind : uint8_t {
-  Invalid,
-  Missing,
-  Unsupported,
-  Memory,
-};
-
-struct Error : std::runtime_error {
-  Error(ErrorKind kind, const std::string& message)
-    : std::runtime_error{message}, kind{kind} {}
-  ErrorKind kind;
-};
 
 struct Path {
   std::string_view archive;

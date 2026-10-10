@@ -26,6 +26,8 @@
 #include <new>
 #include <string>
 
+#include "iresearch/utils/pg/sql_exception_macro.hpp"
+
 namespace sdb::connector::zip {
 namespace {
 
@@ -43,7 +45,7 @@ constexpr size_t kChunk = 64 * 1024;
 constexpr uint32_t kMax32 = UINT32_MAX;
 
 void Invalid(const char* message) {
-  throw Error{ErrorKind::Invalid, message};
+  THROW_SQL_ERROR(ERR_CODE(ERRCODE_IO_ERROR), ERR_MSG(message));
 }
 
 uint64_t Number(std::span<const std::byte> bytes, size_t offset, size_t width) {
@@ -281,8 +283,8 @@ Path ParsePath(std::string_view path) {
   }
   path.remove_prefix(6);
   if (path.find_first_of("*?[") != path.npos) {
-    throw Error{ErrorKind::Unsupported,
-                "ZIP glob patterns are not supported yet"};
+    THROW_SQL_ERROR(ERR_CODE(ERRCODE_FEATURE_NOT_SUPPORTED),
+                    ERR_MSG("ZIP glob patterns are not supported yet"));
   }
   const auto split = path.find(".zip");
   if (split == path.npos || split + 4 >= path.size() ||
@@ -294,8 +296,8 @@ Path ParsePath(std::string_view path) {
       result.archive.find('\0') != path.npos ||
       result.archive.find('\\') != path.npos ||
       result.archive.starts_with("//")) {
-    throw Error{ErrorKind::Unsupported,
-                "ZIP supports only local archive files"};
+    THROW_SQL_ERROR(ERR_CODE(ERRCODE_FEATURE_NOT_SUPPORTED),
+                    ERR_MSG("ZIP supports only local archive files"));
   }
   if (result.member.empty() || result.member.back() == '/') {
     Invalid("ZIP path must select one file, not an archive or directory");
@@ -340,7 +342,8 @@ EntryInfo FindEntry(Source& source, std::string_view member) {
   }
   if (Number(tail, eocd + 4, 2) || Number(tail, eocd + 6, 2) ||
       Number(tail, eocd + 8, 2) != Number(tail, eocd + 10, 2)) {
-    throw Error{ErrorKind::Unsupported, "Multi-disk ZIP is not supported"};
+    THROW_SQL_ERROR(ERR_CODE(ERRCODE_FEATURE_NOT_SUPPORTED),
+                    ERR_MSG("Multi-disk ZIP is not supported"));
   }
   uint64_t count = Number(tail, eocd + 10, 2);
   uint64_t cd_size = Number(tail, eocd + 12, 4);
@@ -410,8 +413,9 @@ EntryInfo FindEntry(Source& source, std::string_view member) {
     bool directory =
       raw.back() == '/' || (attributes & 0x10) || unix_type == 0040000;
     if (unix_type && unix_type != 0100000 && unix_type != 0040000) {
-      throw Error{ErrorKind::Unsupported,
-                  "ZIP symlink and special entries are not supported"};
+      THROW_SQL_ERROR(
+        ERR_CODE(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ERR_MSG("ZIP symlink and special entries are not supported"));
     }
     directory_index.Add(cursor);
     uint64_t size = Number(header, 24, 4);
@@ -421,7 +425,8 @@ EntryInfo FindEntry(Source& source, std::string_view member) {
     Zip64(std::span{variable}.subspan(name_size), size, compressed, offset,
           disk);
     if (disk) {
-      throw Error{ErrorKind::Unsupported, "Multi-disk ZIP is not supported"};
+      THROW_SQL_ERROR(ERR_CODE(ERRCODE_FEATURE_NOT_SUPPORTED),
+                      ERR_MSG("Multi-disk ZIP is not supported"));
     }
     Range(offset, 30, cd_offset);
     if (name == wanted) {
@@ -429,13 +434,14 @@ EntryInfo FindEntry(Source& source, std::string_view member) {
         Invalid("ZIP member is a directory");
       }
       if (flags & (1 | 32 | 64 | 8192)) {
-        throw Error{ErrorKind::Unsupported,
-                    "Encrypted or patched ZIP entries are not supported"};
+        THROW_SQL_ERROR(
+          ERR_CODE(ERRCODE_FEATURE_NOT_SUPPORTED),
+          ERR_MSG("Encrypted or patched ZIP entries are not supported"));
       }
       entry_info.method = Number(header, 10, 2);
       if (entry_info.method != kStore && entry_info.method != kDeflate) {
-        throw Error{ErrorKind::Unsupported,
-                    "Unsupported ZIP compression method"};
+        THROW_SQL_ERROR(ERR_CODE(ERRCODE_FEATURE_NOT_SUPPORTED),
+                        ERR_MSG("Unsupported ZIP compression method"));
       }
       if (size > INT64_MAX || compressed > INT64_MAX) {
         Invalid("ZIP member size exceeds supported range");
@@ -455,7 +461,8 @@ EntryInfo FindEntry(Source& source, std::string_view member) {
   }
   directory_index.ValidateNames();
   if (!found) {
-    throw Error{ErrorKind::Missing, "ZIP member not found"};
+    THROW_SQL_ERROR(ERR_CODE(ERRCODE_UNDEFINED_FILE),
+                    ERR_MSG("ZIP member not found"));
   }
   std::array<std::byte, 30> local;
   source.ReadAt(selected_offset, local);
@@ -539,7 +546,8 @@ void Reader::Start() {
   _stream = {};
   const int status = inflateInit2(&_stream, -MAX_WBITS);
   if (status != Z_OK) {
-    throw Error{ErrorKind::Memory, "ZIP decoder allocation failed"};
+    THROW_SQL_ERROR(ERR_CODE(ERRCODE_OUT_OF_MEMORY),
+                    ERR_MSG("ZIP decoder allocation failed"));
   }
   _started = true;
   _decoded = 0;
@@ -571,7 +579,8 @@ size_t Reader::Inflate(std::span<std::byte> output) {
   const auto input_before = _stream.avail_in;
   const auto status = inflate(&_stream, Z_NO_FLUSH);
   if (status == Z_MEM_ERROR) {
-    throw Error{ErrorKind::Memory, "ZIP decoder allocation failed"};
+    THROW_SQL_ERROR(ERR_CODE(ERRCODE_OUT_OF_MEMORY),
+                    ERR_MSG("ZIP decoder allocation failed"));
   }
   if (status != Z_OK && status != Z_STREAM_END) {
     Invalid("Invalid or truncated ZIP DEFLATE stream");

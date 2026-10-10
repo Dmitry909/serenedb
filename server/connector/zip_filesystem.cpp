@@ -18,7 +18,7 @@
 /// Copyright holder is SereneDB GmbH, Berlin, Germany
 ////////////////////////////////////////////////////////////////////////////////
 
-#include "connector/duckdb_zip_filesystem.hpp"
+#include "connector/zip_filesystem.hpp"
 
 #include <sys/stat.h>
 
@@ -35,16 +35,6 @@
 
 namespace sdb::connector {
 namespace {
-
-[[noreturn]] void Translate(const zip::Error& error) {
-  if (error.kind == zip::ErrorKind::Memory) {
-    THROW_SQL_ERROR(ERR_CODE(ERRCODE_OUT_OF_MEMORY), ERR_MSG(error.what()));
-  }
-  if (error.kind == zip::ErrorKind::Unsupported) {
-    throw duckdb::NotImplementedException("%s", error.what());
-  }
-  THROW_SQL_ERROR(ERR_CODE(ERRCODE_IO_ERROR), ERR_MSG(error.what()));
-}
 
 class LocalSource final : public zip::Source {
  public:
@@ -184,12 +174,12 @@ duckdb::unique_ptr<duckdb::FileHandle> ZipFileSystem::OpenFile(
     return duckdb::make_uniq<ZipHandle>(
       *this, path, flags, std::move(local), std::move(file),
       duckdb::FileOpener::TryGetClientContext(opener), parsed.member);
-  } catch (const zip::Error& error) {
-    if (error.kind == zip::ErrorKind::Missing &&
+  } catch (const irs::SqlException& error) {
+    if (error.error().errcode == ERRCODE_UNDEFINED_FILE &&
         flags.ReturnNullIfNotExists()) {
       return nullptr;
     }
-    Translate(error);
+    throw;
   } catch (const std::bad_alloc&) {
     THROW_SQL_ERROR(ERR_CODE(ERRCODE_OUT_OF_MEMORY),
                     ERR_MSG("ZIP allocation failed"));
@@ -204,8 +194,6 @@ int64_t ZipFileSystem::Read(duckdb::FileHandle& handle, void* buffer,
   try {
     return zip.GetReader().Read(
       {static_cast<std::byte*>(buffer), static_cast<size_t>(count)});
-  } catch (const zip::Error& error) {
-    Translate(error);
   } catch (const std::bad_alloc&) {
     THROW_SQL_ERROR(ERR_CODE(ERRCODE_OUT_OF_MEMORY),
                     ERR_MSG("ZIP allocation failed"));
@@ -220,8 +208,6 @@ void ZipFileSystem::Read(duckdb::FileHandle& handle, void* buffer,
   try {
     zip.GetReader().ReadAt(
       offset, {static_cast<std::byte*>(buffer), static_cast<size_t>(count)});
-  } catch (const zip::Error& error) {
-    Translate(error);
   } catch (const std::bad_alloc&) {
     THROW_SQL_ERROR(ERR_CODE(ERRCODE_OUT_OF_MEMORY),
                     ERR_MSG("ZIP allocation failed"));
@@ -233,8 +219,6 @@ void ZipFileSystem::Seek(duckdb::FileHandle& handle, duckdb::idx_t offset) {
   std::lock_guard lock{zip.mutex};
   try {
     zip.GetReader().Seek(offset);
-  } catch (const zip::Error& error) {
-    Translate(error);
   } catch (const std::bad_alloc&) {
     THROW_SQL_ERROR(ERR_CODE(ERRCODE_OUT_OF_MEMORY),
                     ERR_MSG("ZIP allocation failed"));
@@ -277,8 +261,6 @@ duckdb::vector<duckdb::OpenFileInfo> ZipFileSystem::Glob(
   const std::string& path, duckdb::FileOpener* opener) {
   try {
     zip::ParsePath(path);
-  } catch (const zip::Error& error) {
-    Translate(error);
   } catch (const std::bad_alloc&) {
     THROW_SQL_ERROR(ERR_CODE(ERRCODE_OUT_OF_MEMORY),
                     ERR_MSG("ZIP allocation failed"));

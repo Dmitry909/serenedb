@@ -23,6 +23,7 @@
 #include <random>
 
 #include "connector/zip_reader.hpp"
+#include "iresearch/utils/pg/sql_exception.hpp"
 #include "zip_fixture.h"
 
 namespace {
@@ -30,7 +31,6 @@ namespace {
 using sdb::connector::zip::kDeflate;
 using sdb::connector::zip::kStore;
 
-using sdb::connector::zip::Error;
 using sdb::connector::zip::Reader;
 
 struct Source final : sdb::connector::zip::Source {
@@ -92,8 +92,8 @@ TEST(ZipReader, StoreDeflateZip64AndDescriptors) {
           }
           reader.Seek(0);
           EXPECT_EQ(ReadAll(reader), input);
-          EXPECT_THROW(reader.Seek(input.size() + 1), Error);
-          EXPECT_THROW(reader.ReadAt(input.size(), buffer), Error);
+          EXPECT_THROW(reader.Seek(input.size() + 1), irs::SqlException);
+          EXPECT_THROW(reader.ReadAt(input.size(), buffer), irs::SqlException);
         }
       }
     }
@@ -107,12 +107,12 @@ TEST(ZipReader, EmptyAndMissingMembers) {
 
     Reader reader{source, "empty"};
     EXPECT_EQ(ReadAll(reader), "");
-    EXPECT_THROW((Reader{source, "missing"}), Error);
+    EXPECT_THROW((Reader{source, "missing"}), irs::SqlException);
   }
   zip_test::Archive archive{{}};
   Source source{archive.bytes};
 
-  EXPECT_THROW((Reader{source, "missing"}), Error);
+  EXPECT_THROW((Reader{source, "missing"}), irs::SqlException);
 }
 
 TEST(ZipReader, RejectsDangerousAndAmbiguousNames) {
@@ -121,7 +121,7 @@ TEST(ZipReader, RejectsDangerousAndAmbiguousNames) {
     zip_test::Archive archive{{{"good", "ok"}, {name, "bad"}}};
     Source source{archive.bytes};
 
-    EXPECT_THROW((Reader{source, "good"}), Error) << name;
+    EXPECT_THROW((Reader{source, "good"}), irs::SqlException) << name;
   }
   for (auto names : {std::vector<std::string>{"a", "./a"},
                      {"a", "a/b"},
@@ -130,13 +130,13 @@ TEST(ZipReader, RejectsDangerousAndAmbiguousNames) {
     zip_test::Archive archive{{{names[0], ""}, {names[1], ""}}};
     Source source{archive.bytes};
 
-    EXPECT_THROW((Reader{source, names[0]}), Error);
+    EXPECT_THROW((Reader{source, names[0]}), irs::SqlException);
   }
   zip_test::Archive archive{
     {{"good", "ok"}, {"link", "good", kStore, 0x800, 0120777U << 16}}};
   Source source{archive.bytes};
 
-  EXPECT_THROW((Reader{source, "good"}), Error);
+  EXPECT_THROW((Reader{source, "good"}), irs::SqlException);
 }
 
 TEST(ZipReader, FullNamesNormalizationAndUnsupportedUnselectedMethod) {
@@ -150,9 +150,9 @@ TEST(ZipReader, FullNamesNormalizationAndUnsupportedUnselectedMethod) {
 
   Reader reader{source, "./" + name};
   EXPECT_EQ(ReadAll(reader), "ok");
-  EXPECT_THROW((Reader{source, "other"}), Error);
-  EXPECT_THROW((Reader{source, "folder"}), Error);
-  EXPECT_THROW((Reader{source, "FOLDER/x"}), Error);
+  EXPECT_THROW((Reader{source, "other"}), irs::SqlException);
+  EXPECT_THROW((Reader{source, "folder"}), irs::SqlException);
+  EXPECT_THROW((Reader{source, "FOLDER/x"}), irs::SqlException);
 }
 
 TEST(ZipReader, CorruptionAndTerminalError) {
@@ -163,15 +163,15 @@ TEST(ZipReader, CorruptionAndTerminalError) {
     Source source{archive.bytes};
 
     Reader reader{source, "data"};
-    EXPECT_THROW(ReadAll(reader), Error);
-    EXPECT_THROW(reader.Seek(0), Error);
+    EXPECT_THROW(ReadAll(reader), irs::SqlException);
+    EXPECT_THROW(reader.Seek(0), irs::SqlException);
   }
   for (auto offset : {size_t{0}, size_t{6}, size_t{18}}) {
     zip_test::Archive archive{{{"data", "hello world"}}};
     archive.bytes[offset] ^= 1;
     Source source{archive.bytes};
 
-    EXPECT_THROW((Reader{source, "data"}), Error);
+    EXPECT_THROW((Reader{source, "data"}), irs::SqlException);
   }
   for (auto delta : {-1, 1}) {
     zip_test::Archive archive{{{"data", "hello world"}}};
@@ -180,7 +180,7 @@ TEST(ZipReader, CorruptionAndTerminalError) {
     Source source{archive.bytes};
 
     Reader reader{source, "data"};
-    EXPECT_THROW(ReadAll(reader), Error);
+    EXPECT_THROW(ReadAll(reader), irs::SqlException);
   }
 }
 
@@ -220,7 +220,7 @@ TEST(ZipReader, PathSyntax) {
        {"a.zip/a.csv", "zip://a.ZIP/a.csv", "zip://a.zip/", "zip://a.zip",
         "zip://a.zip!!a.csv", "zip://s3://b/a.zip/a.csv",
         "zip://https://host/a.zip/a.csv", "zip://zip://a.zip/b.zip/c.csv"}) {
-    EXPECT_THROW(ParsePath(path), Error) << path;
+    EXPECT_THROW(ParsePath(path), irs::SqlException) << path;
   }
 }
 
@@ -231,7 +231,7 @@ TEST(ZipReader, TruncationAndMutatedHeaders) {
     auto bytes = original.bytes.substr(0, length);
     Source source{bytes};
 
-    EXPECT_THROW((Reader{source, "data"}), Error);
+    EXPECT_THROW((Reader{source, "data"}), irs::SqlException);
   }
   std::mt19937 random{43};
   for (int i = 0; i < 500; ++i) {
@@ -242,7 +242,7 @@ TEST(ZipReader, TruncationAndMutatedHeaders) {
     try {
       Reader reader{source, "data"};
       ReadAll(reader);
-    } catch (const Error&) {
+    } catch (const irs::SqlException&) {
     }
   }
 }
@@ -255,7 +255,7 @@ TEST(ZipReader, RejectsTrailingCompressedBytesAndInvalidEmptyStream) {
     Source source{archive.bytes};
 
     Reader reader{source, "data"};
-    EXPECT_THROW(ReadAll(reader), Error);
+    EXPECT_THROW(ReadAll(reader), irs::SqlException);
     EXPECT_GT(compressed_size, 0);
   }
   zip_test::Archive archive{{{"data", "abc"}}};
@@ -269,7 +269,7 @@ TEST(ZipReader, RejectsTrailingCompressedBytesAndInvalidEmptyStream) {
   Source source{archive.bytes};
 
   Reader reader{source, "data"};
-  EXPECT_THROW(ReadAll(reader), Error);
+  EXPECT_THROW(ReadAll(reader), irs::SqlException);
 }
 
 TEST(ZipReader, MetadataCacheThresholdAndDiskOffsets) {
@@ -304,7 +304,7 @@ TEST(ZipReader, MetadataCacheThresholdAndDiskOffsets) {
     }
     std::memcpy(archive.bytes.data() + archive.central[799] + 46, "file-800",
                 8);
-    EXPECT_THROW((Reader{source, "file-800"}), Error);
+    EXPECT_THROW((Reader{source, "file-800"}), irs::SqlException);
   }
 }
 
@@ -316,7 +316,7 @@ TEST(ZipReader, ComponentOrderingDetectsNonAdjacentFileConflicts) {
        }) {
     zip_test::Archive archive{entries};
     Source source{archive.bytes};
-    EXPECT_THROW((Reader{source, "a!"}), Error);
+    EXPECT_THROW((Reader{source, "a!"}), irs::SqlException);
   }
 }
 

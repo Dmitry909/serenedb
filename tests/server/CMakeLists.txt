@@ -42,7 +42,7 @@ add_executable(
     connector/copy_in_bridge_test.cpp
     connector/duckdb_search_filter_builder_test.cpp
     connector/duckdb_search_sink_writer_test.cpp
-    connector/duckdb_zip_filesystem_test.cpp
+    connector/zip_filesystem_test.cpp
     connector/index_lifecycle_test.cpp
     connector/pg_progress_registry_test.cpp
     connector/pg_serialize_array_test.cpp

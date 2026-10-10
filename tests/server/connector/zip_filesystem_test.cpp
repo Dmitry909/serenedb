@@ -28,7 +28,7 @@
 #include <fstream>
 #include <thread>
 
-#include "connector/duckdb_zip_filesystem.hpp"
+#include "connector/zip_filesystem.hpp"
 #include "iresearch/utils/pg/sql_exception.hpp"
 #include "zip_fixture.h"
 
