@@ -49,23 +49,29 @@ class LocalSource final : public zip::Source {
       context = client->shared_from_this();
     }
   }
+
   uint64_t Size() const final { return size; }
+
   void Check() final {
     if (auto client = context.lock()) {
       client->InterruptCheck();
     }
+
     if (file->GetFileSize() != size ||
         fs->GetLastModifiedTime(*file) != modified) {
       THROW_SQL_ERROR(ERR_CODE(ERRCODE_IO_ERROR),
                       ERR_MSG("ZIP archive changed while reading"));
     }
   }
+
   void ReadAt(uint64_t offset, std::span<std::byte> output) final {
     Check();
+
     if (offset > uint64_t(size) || output.size() > uint64_t(size) - offset) {
       THROW_SQL_ERROR(ERR_CODE(ERRCODE_IO_ERROR),
                       ERR_MSG("ZIP read exceeds archive bounds"));
     }
+
     file->Read(output.data(), output.size(), offset);
   }
 
@@ -87,12 +93,15 @@ class ZipHandle final : public duckdb::FileHandle {
     : FileHandle{fs, path, flags},
       source{std::move(local), std::move(file), client},
       reader{std::in_place, source, member} {}
+
   ~ZipHandle() noexcept final { Close(); }
+
   void Close() final {
     std::lock_guard lock{mutex};
     reader.reset();
     source.file.reset();
   }
+
   zip::Reader& GetReader() {
     if (!reader) {
       THROW_SQL_ERROR(ERR_CODE(ERRCODE_IO_ERROR),
@@ -100,6 +109,7 @@ class ZipHandle final : public duckdb::FileHandle {
     }
     return *reader;
   }
+
   LocalSource source;
   std::optional<zip::Reader> reader;
   std::mutex mutex;
@@ -128,11 +138,13 @@ duckdb::unique_ptr<duckdb::FileHandle> ZipFileSystem::OpenFile(
         flags.OpenForAppending()) {
       throw duckdb::NotImplementedException("ZIP filesystem is read-only");
     }
+
     auto db = duckdb::FileOpener::TryGetDatabase(opener);
     if (!db) {
       THROW_SQL_ERROR(ERR_CODE(ERRCODE_IO_ERROR),
                       ERR_MSG("ZIP reading requires a database file opener"));
     }
+
     auto local = duckdb::FileSystem::CreateLocal();
     const auto archive = local->ExpandPath(std::string{parsed.archive}, opener);
     auto& registered = duckdb::FileSystem::GetFileSystem(*db);
@@ -140,11 +152,13 @@ duckdb::unique_ptr<duckdb::FileHandle> ZipFileSystem::OpenFile(
       THROW_SQL_ERROR(ERR_CODE(ERRCODE_INSUFFICIENT_PRIVILEGE),
                       ERR_MSG("Local filesystem is disabled"));
     }
+
     if (!db->config.CanAccessFile(archive,
                                   duckdb::FileType::FILE_TYPE_REGULAR)) {
       THROW_SQL_ERROR(ERR_CODE(ERRCODE_INSUFFICIENT_PRIVILEGE),
                       ERR_MSG("Cannot access ZIP archive: ", archive));
     }
+
     struct stat stat;
     if (::stat(archive.c_str(), &stat) != 0) {
       if (errno == ENOENT && flags.ReturnNullIfNotExists()) {
@@ -158,12 +172,14 @@ duckdb::unique_ptr<duckdb::FileHandle> ZipFileSystem::OpenFile(
       throw duckdb::NotImplementedException(
         "ZIP source must be a regular local file");
     }
+
     const auto canonical = local->CanonicalizePath(archive, opener);
     if (!db->config.CanAccessFile(canonical,
                                   duckdb::FileType::FILE_TYPE_REGULAR)) {
       THROW_SQL_ERROR(ERR_CODE(ERRCODE_INSUFFICIENT_PRIVILEGE),
                       ERR_MSG("Cannot access ZIP archive: ", canonical));
     }
+
     auto file =
       local->OpenFile(archive, duckdb::FileFlags::FILE_FLAGS_READ, opener);
     if (file->GetType() != duckdb::FileType::FILE_TYPE_REGULAR ||
@@ -171,6 +187,7 @@ duckdb::unique_ptr<duckdb::FileHandle> ZipFileSystem::OpenFile(
       THROW_SQL_ERROR(ERR_CODE(ERRCODE_IO_ERROR),
                       ERR_MSG("ZIP source must remain a regular local file"));
     }
+
     return duckdb::make_uniq<ZipHandle>(
       *this, path, flags, std::move(local), std::move(file),
       duckdb::FileOpener::TryGetClientContext(opener), parsed.member);
@@ -179,6 +196,7 @@ duckdb::unique_ptr<duckdb::FileHandle> ZipFileSystem::OpenFile(
         flags.ReturnNullIfNotExists()) {
       return nullptr;
     }
+
     throw;
   } catch (const std::bad_alloc&) {
     THROW_SQL_ERROR(ERR_CODE(ERRCODE_OUT_OF_MEMORY),
@@ -190,6 +208,7 @@ int64_t ZipFileSystem::Read(duckdb::FileHandle& handle, void* buffer,
                             int64_t count) {
   ValidateCount(count);
   auto& zip = handle.Cast<ZipHandle>();
+
   std::lock_guard lock{zip.mutex};
   try {
     return zip.GetReader().Read(
@@ -204,6 +223,7 @@ void ZipFileSystem::Read(duckdb::FileHandle& handle, void* buffer,
                          int64_t count, duckdb::idx_t offset) {
   ValidateCount(count);
   auto& zip = handle.Cast<ZipHandle>();
+
   std::lock_guard lock{zip.mutex};
   try {
     zip.GetReader().ReadAt(
@@ -216,6 +236,7 @@ void ZipFileSystem::Read(duckdb::FileHandle& handle, void* buffer,
 
 void ZipFileSystem::Seek(duckdb::FileHandle& handle, duckdb::idx_t offset) {
   auto& zip = handle.Cast<ZipHandle>();
+
   std::lock_guard lock{zip.mutex};
   try {
     zip.GetReader().Seek(offset);
@@ -227,12 +248,14 @@ void ZipFileSystem::Seek(duckdb::FileHandle& handle, duckdb::idx_t offset) {
 
 duckdb::idx_t ZipFileSystem::SeekPosition(duckdb::FileHandle& handle) {
   auto& zip = handle.Cast<ZipHandle>();
+
   std::lock_guard lock{zip.mutex};
   return zip.GetReader().Position();
 }
 
 int64_t ZipFileSystem::GetFileSize(duckdb::FileHandle& handle) {
   auto& zip = handle.Cast<ZipHandle>();
+
   std::lock_guard lock{zip.mutex};
   return zip.GetReader().Size();
 }
@@ -240,6 +263,7 @@ int64_t ZipFileSystem::GetFileSize(duckdb::FileHandle& handle) {
 duckdb::timestamp_t ZipFileSystem::GetLastModifiedTime(
   duckdb::FileHandle& handle) {
   auto& zip = handle.Cast<ZipHandle>();
+
   std::lock_guard lock{zip.mutex};
   zip.GetReader();
   return zip.source.modified;

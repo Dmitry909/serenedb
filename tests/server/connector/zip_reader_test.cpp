@@ -35,20 +35,25 @@ using sdb::connector::zip::Reader;
 
 struct Source final : sdb::connector::zip::Source {
   explicit Source(const std::string& bytes) : bytes{bytes} {}
+
   uint64_t Size() const final { return bytes.size(); }
+
   void ReadAt(uint64_t offset, std::span<std::byte> output) final {
     if (offset > bytes.size() || output.size() > bytes.size() - offset) {
       throw std::runtime_error{"short source"};
     }
+
     std::memcpy(output.data(), bytes.data() + offset, output.size());
     read += output.size();
     largest_read = std::max(largest_read, output.size());
   }
+
   void Check() final {
     if (cancel_after && ++checks >= cancel_after) {
       throw std::runtime_error{"cancelled"};
     }
   }
+
   const std::string& bytes;
   size_t read = 0;
   size_t largest_read = 0;
@@ -59,6 +64,7 @@ struct Source final : sdb::connector::zip::Source {
 std::string ReadAll(Reader& reader) {
   std::string result;
   std::array<std::byte, 113> buffer;
+
   while (auto count = reader.Read(buffer)) {
     result.append(reinterpret_cast<char*>(buffer.data()), count);
   }
@@ -70,6 +76,7 @@ TEST(ZipReader, StoreDeflateZip64AndDescriptors) {
   for (size_t i = 0; i < 200000; ++i) {
     input += char(i * 17);
   }
+
   for (auto method : {kStore, kDeflate}) {
     for (bool zip64 : {false, true}) {
       for (bool descriptor : {false, true}) {
@@ -79,9 +86,10 @@ TEST(ZipReader, StoreDeflateZip64AndDescriptors) {
 
         {
           Reader reader{source, "dir/data"};
-          EXPECT_EQ(ReadAll(reader), input);
           std::array<std::byte, 137> buffer;
           std::mt19937 random{12};
+          EXPECT_EQ(ReadAll(reader), input);
+
           for (int i = 0; i < 20; ++i) {
             auto offset = random() % (input.size() - buffer.size());
             reader.ReadAt(offset, buffer);
@@ -90,6 +98,7 @@ TEST(ZipReader, StoreDeflateZip64AndDescriptors) {
               0);
             EXPECT_EQ(reader.Position(), offset + buffer.size());
           }
+
           reader.Seek(0);
           EXPECT_EQ(ReadAll(reader), input);
           EXPECT_THROW(reader.Seek(input.size() + 1), irs::SqlException);
@@ -109,6 +118,7 @@ TEST(ZipReader, EmptyAndMissingMembers) {
     EXPECT_EQ(ReadAll(reader), "");
     EXPECT_THROW((Reader{source, "missing"}), irs::SqlException);
   }
+
   zip_test::Archive archive{{}};
   Source source{archive.bytes};
 
@@ -123,6 +133,7 @@ TEST(ZipReader, RejectsDangerousAndAmbiguousNames) {
 
     EXPECT_THROW((Reader{source, "good"}), irs::SqlException) << name;
   }
+
   for (auto names : {std::vector<std::string>{"a", "./a"},
                      {"a", "a/b"},
                      {"a/b", "a"},
@@ -132,6 +143,7 @@ TEST(ZipReader, RejectsDangerousAndAmbiguousNames) {
 
     EXPECT_THROW((Reader{source, names[0]}), irs::SqlException);
   }
+
   zip_test::Archive archive{
     {{"good", "ok"}, {"link", "good", kStore, 0x800, 0120777U << 16}}};
   Source source{archive.bytes};
@@ -237,6 +249,7 @@ TEST(ZipReader, TruncationAndMutatedHeaders) {
 
     EXPECT_THROW((Reader{source, "data"}), irs::SqlException);
   }
+
   std::mt19937 random{43};
   for (int i = 0; i < 500; ++i) {
     auto bytes = original.bytes;
