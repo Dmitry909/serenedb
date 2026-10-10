@@ -142,14 +142,18 @@ TEST(ZipReader, RejectsDangerousAndAmbiguousNames) {
 TEST(ZipReader, FullNamesNormalizationAndUnsupportedUnselectedMethod) {
   std::string name(600, 'x');
   name += "/café.csv";
+  const std::string raw_name = "raw/\xff.csv";
   zip_test::Archive archive{{{name, "ok"},
                              {"other", "opaque", 99},
                              {"folder/", "", kStore},
-                             {"folder/x", "x"}}};
+                             {"folder/x", "x"},
+                             {raw_name, "raw"}}};
   Source source{archive.bytes};
 
   Reader reader{source, "./" + name};
   EXPECT_EQ(ReadAll(reader), "ok");
+  Reader raw_reader{source, raw_name};
+  EXPECT_EQ(ReadAll(raw_reader), "raw");
   EXPECT_THROW((Reader{source, "other"}), irs::SqlException);
   EXPECT_THROW((Reader{source, "folder"}), irs::SqlException);
   EXPECT_THROW((Reader{source, "FOLDER/x"}), irs::SqlException);
