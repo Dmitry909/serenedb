@@ -63,6 +63,8 @@ target_sources(
 
 target_link_libraries(sereneserver PRIVATE simdjson)
 
+# view_fast_path.cpp reads iceberg-bound snapshot ids; iceberg's REST
+# headers include yyjson unprefixed.
 target_include_directories(
     sereneserver
     PRIVATE
