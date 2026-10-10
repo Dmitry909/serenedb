@@ -42,7 +42,7 @@ EntryInfo FindEntry(Source& source, std::string_view member);
 constexpr size_t kChunk = 64 * 1024;
 constexpr uint32_t kMax32 = UINT32_MAX;
 
-[[noreturn]] void Invalid(const char* message) {
+void Invalid(const char* message) {
   throw Error{ErrorKind::Invalid, message};
 }
 
@@ -433,7 +433,7 @@ EntryInfo FindEntry(Source& source, std::string_view member) {
                     "Encrypted or patched ZIP entries are not supported"};
       }
       entry_info.method = Number(header, 10, 2);
-      if (entry_info.method != 0 && entry_info.method != 8) {
+      if (entry_info.method != kStore && entry_info.method != kDeflate) {
         throw Error{ErrorKind::Unsupported,
                     "Unsupported ZIP compression method"};
       }
@@ -516,7 +516,8 @@ EntryInfo FindEntry(Source& source, std::string_view member) {
       Invalid("ZIP data descriptor disagrees with central directory");
     }
   }
-  if (entry_info.method == 0 && entry_info.size != entry_info.compressed_size) {
+  if (entry_info.method == kStore &&
+      entry_info.size != entry_info.compressed_size) {
     Invalid("Stored ZIP member has inconsistent sizes");
   }
   return entry_info;
@@ -608,7 +609,7 @@ void Reader::Advance(uint64_t target) {
 }
 
 void Reader::Finish() {
-  if (_method == 8 && !_verified) {
+  if (_method == kDeflate && !_verified) {
     if (!_started) {
       Start();
     }
@@ -616,7 +617,7 @@ void Reader::Finish() {
     while (!_ended) {
       Inflate(probe);
     }
-  } else if (_method == 0 && _crc_valid && _crc_position == _size &&
+  } else if (_method == kStore && _crc_valid && _crc_position == _size &&
              _crc != _expected_crc) {
     Invalid("ZIP CRC mismatch");
   }
@@ -629,7 +630,7 @@ size_t Reader::Read(std::span<std::byte> output) {
       return 0;
     }
     size_t count = std::min<uint64_t>(output.size(), _size - _position);
-    if (_method == 8) {
+    if (_method == kDeflate) {
       Advance(_position);
       size_t done = 0;
       while (done < count) {
@@ -666,7 +667,7 @@ void Reader::Seek(uint64_t offset) {
   CheckState();
   Range(offset, 0, _size);
   _position = offset;
-  if (!offset && _method == 0) {
+  if (!offset && _method == kStore) {
     _crc_position = 0;
     _crc_valid = true;
     _crc = 0;

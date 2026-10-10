@@ -27,6 +27,9 @@
 
 namespace {
 
+using sdb::connector::zip::kDeflate;
+using sdb::connector::zip::kStore;
+
 using sdb::connector::zip::Error;
 using sdb::connector::zip::Reader;
 
@@ -67,11 +70,11 @@ TEST(ZipReader, StoreDeflateZip64AndDescriptors) {
   for (size_t i = 0; i < 200000; ++i) {
     input += char(i * 17);
   }
-  for (auto method : {0, 8}) {
+  for (auto method : {kStore, kDeflate}) {
     for (bool zip64 : {false, true}) {
       for (bool descriptor : {false, true}) {
         zip_test::Archive archive{
-          {{"dir/data", input, uint16_t(method)}}, zip64, descriptor};
+          {{"dir/data", input, method}}, zip64, descriptor};
         Source source{archive.bytes};
 
         {
@@ -98,8 +101,8 @@ TEST(ZipReader, StoreDeflateZip64AndDescriptors) {
 }
 
 TEST(ZipReader, EmptyAndMissingMembers) {
-  for (auto method : {0, 8}) {
-    zip_test::Archive archive{{{"empty", "", uint16_t(method)}}};
+  for (auto method : {kStore, kDeflate}) {
+    zip_test::Archive archive{{{"empty", "", method}}};
     Source source{archive.bytes};
 
     Reader reader{source, "empty"};
@@ -130,7 +133,7 @@ TEST(ZipReader, RejectsDangerousAndAmbiguousNames) {
     EXPECT_THROW((Reader{source, names[0]}), Error);
   }
   zip_test::Archive archive{
-    {{"good", "ok"}, {"link", "good", 0, 0x800, 0120777U << 16}}};
+    {{"good", "ok"}, {"link", "good", kStore, 0x800, 0120777U << 16}}};
   Source source{archive.bytes};
 
   EXPECT_THROW((Reader{source, "good"}), Error);
@@ -141,7 +144,7 @@ TEST(ZipReader, FullNamesNormalizationAndUnsupportedUnselectedMethod) {
   name += "/café.csv";
   zip_test::Archive archive{{{name, "ok"},
                              {"other", "opaque", 99},
-                             {"folder/", "", 0},
+                             {"folder/", "", kStore},
                              {"folder/x", "x"}}};
   Source source{archive.bytes};
 
@@ -153,8 +156,8 @@ TEST(ZipReader, FullNamesNormalizationAndUnsupportedUnselectedMethod) {
 }
 
 TEST(ZipReader, CorruptionAndTerminalError) {
-  for (auto method : {0, 8}) {
-    zip_test::Archive archive{{{"data", "hello world", uint16_t(method)}}};
+  for (auto method : {kStore, kDeflate}) {
+    zip_test::Archive archive{{{"data", "hello world", method}}};
     zip_test::Patch(archive.bytes, archive.central[0] + 16, 123, 4);
     zip_test::Patch(archive.bytes, 14, 123, 4);
     Source source{archive.bytes};
@@ -191,10 +194,10 @@ TEST(ZipReader, CancellationDuringSeek) {
 }
 
 TEST(ZipReader, BoundedBuffersAndLazyRead) {
-  for (auto method : {0, 8}) {
+  for (auto method : {kStore, kDeflate}) {
     zip_test::Archive archive{
-      {{"data", std::string(2 * 1024 * 1024, 'a'), uint16_t(method)},
-       {"other", std::string(2 * 1024 * 1024, 'b'), uint16_t(method)}}};
+      {{"data", std::string(2 * 1024 * 1024, 'a'), method},
+       {"other", std::string(2 * 1024 * 1024, 'b'), method}}};
     Source source{archive.bytes};
 
     size_t read_at_close;
@@ -276,7 +279,7 @@ TEST(ZipReader, MetadataCacheThresholdAndDiskOffsets) {
     std::vector<zip_test::Entry> entries;
     size_t base = 0;
     for (size_t i = 0; i < 801; ++i) {
-      entries.push_back({"file-" + std::to_string(i), "ok", 0});
+      entries.push_back({"file-" + std::to_string(i), "ok", kStore});
       base += 46 + entries.back().name.size();
     }
     size_t remaining = size - base;

@@ -31,6 +31,9 @@
 
 namespace sdb::connector::zip {
 
+inline constexpr uint16_t kStore = 0;
+inline constexpr uint16_t kDeflate = 8;
+
 enum class ErrorKind : uint8_t {
   Invalid,
   Missing,
@@ -95,7 +98,7 @@ class Reader {
   uint64_t _crc_position = 0;
   uint32_t _expected_crc = 0;
   uint32_t _crc = 0;
-  uint16_t _method = 0;
+  uint16_t _method = kStore;
   bool _started = false;
   bool _ended = false;
   bool _verified = false;

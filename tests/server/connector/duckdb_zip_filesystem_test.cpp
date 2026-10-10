@@ -34,6 +34,9 @@
 
 namespace {
 
+using sdb::connector::zip::kDeflate;
+using sdb::connector::zip::kStore;
+
 class ZipFileSystemTest : public testing::Test {
  protected:
   ZipFileSystemTest()
@@ -74,9 +77,8 @@ TEST_F(ZipFileSystemTest, ConcurrentReadsAndIndependentHandles) {
   for (size_t i = 0; i < 300000; ++i) {
     data += char(i * 13);
   }
-  for (auto method : {0, 8}) {
-    const auto prefix =
-      Write({{"data", data, uint16_t(method)}, {"other", "other"}});
+  for (auto method : {kStore, kDeflate}) {
+    const auto prefix = Write({{"data", data, method}, {"other", "other"}});
     auto file = Open(prefix + "data");
     auto other = Open(prefix + "other");
     std::vector<std::thread> threads;
@@ -173,18 +175,18 @@ TEST_F(ZipFileSystemTest, CsvJsonAndParquetQueries) {
   std::ifstream parquet_file{parquet_path, std::ios::binary};
   std::string parquet{std::istreambuf_iterator<char>{parquet_file},
                       std::istreambuf_iterator<char>{}};
-  for (auto method : {0, 8}) {
+  for (auto method : {kStore, kDeflate}) {
     const auto prefix =
-      Write({{"data.csv", "id,value\n1,2\n2,4\n3,6\n", uint16_t(method)},
+      Write({{"data.csv", "id,value\n1,2\n2,4\n3,6\n", method},
              {"data.json",
               "[{\"id\":1,\"value\":2},{\"id\":2,\"value\":4},{\"id\":3,"
               "\"value\":6}]",
-              uint16_t(method)},
+              method},
              {"data.jsonl",
               "{\"id\":1,\"value\":2}\n{\"id\":2,\"value\":4}\n{\"id\":3,"
               "\"value\":6}\n",
-              uint16_t(method)},
-             {"data.parquet", parquet, uint16_t(method)}});
+              method},
+             {"data.parquet", parquet, method}});
     for (const auto& name :
          {"data.csv", "data.json", "data.jsonl", "data.parquet"}) {
       auto result =
@@ -229,7 +231,7 @@ TEST_F(ZipFileSystemTest, CsvJsonAndParquetQueries) {
 
 TEST_F(ZipFileSystemTest, SqlErrorsReachCaller) {
   const auto prefix = Write({{"data.csv", "id,value\n1,2\n"}});
-  zip_test::Archive corrupt{{{"data.csv", "id,value\n1,2\n", 0}}};
+  zip_test::Archive corrupt{{{"data.csv", "id,value\n1,2\n", kStore}}};
   corrupt.bytes[corrupt.data[0]] ^= 1;
   {
     std::ofstream file{directory + "/data.zip", std::ios::binary};
