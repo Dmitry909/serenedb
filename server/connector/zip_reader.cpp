@@ -411,7 +411,6 @@ EntryInfo FindEntry(Source& source, std::string_view member) {
 
   for (uint64_t i = 0; i < count; ++i) {
     source.Check();
-    CheckRange(cursor, 46, cd_offset + cd_size);
     std::array<std::byte, 46> header;
     directory_index.Read(cursor, header);
 
@@ -605,7 +604,6 @@ void Reader::Start() {
   _loaded = 0;
   _crc = 0;
   _ended = false;
-  _verified = false;
 }
 
 void Reader::CheckState() {
@@ -630,7 +628,6 @@ size_t Reader::Inflate(std::span<std::byte> output) {
   const auto count = std::min(output.size(), kChunk);
   _stream.next_out = reinterpret_cast<Bytef*>(output.data());
   _stream.avail_out = count;
-  const auto input_before = _stream.avail_in;
   const auto status = inflate(&_stream, Z_NO_FLUSH);
 
   if (status == Z_MEM_ERROR) {
@@ -651,17 +648,12 @@ size_t Reader::Inflate(std::span<std::byte> output) {
   _crc = crc32(_crc, reinterpret_cast<const Bytef*>(output.data()), produced);
   _ended = status == Z_STREAM_END;
 
-  if (!_ended && !produced && input_before == _stream.avail_in) {
-    InvalidException("ZIP DEFLATE stream made no progress");
-  }
-
   if (_ended &&
       (_decoded != _size || _loaded - _stream.avail_in != _compressed_size ||
        _crc != _expected_crc)) {
     InvalidException("ZIP stream size or CRC mismatch");
   }
 
-  _verified = _ended;
   return produced;
 }
 
@@ -673,25 +665,16 @@ void Reader::Advance(uint64_t target) {
   while (_decoded < target) {
     const auto count = std::min<uint64_t>(_discard.size(), target - _decoded);
     Inflate(std::span{_discard}.first(count));
-
-    if (_ended && _decoded < target) {
-      InvalidException("Unexpected ZIP EOF");
-    }
   }
 }
 
 void Reader::Finish() {
-  if (_method == kDeflate && !_verified) {
-    if (!_started) {
-      Start();
-    }
-
+  if (_method == kDeflate && !_ended) {
     std::array<std::byte, 1> probe;
     while (!_ended) {
       Inflate(probe);
     }
-  } else if (_method == kStore && _crc_valid && _crc_position == _size &&
-             _crc != _expected_crc) {
+  } else if (_method == kStore && _crc_valid && _crc != _expected_crc) {
     InvalidException("ZIP CRC mismatch");
   }
 }

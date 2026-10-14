@@ -182,8 +182,7 @@ duckdb::unique_ptr<duckdb::FileHandle> ZipFileSystem::OpenFile(
 
     auto file =
       local->OpenFile(archive, duckdb::FileFlags::FILE_FLAGS_READ, opener);
-    if (file->GetType() != duckdb::FileType::FILE_TYPE_REGULAR ||
-        !file->CanSeek()) {
+    if (file->GetType() != duckdb::FileType::FILE_TYPE_REGULAR) {
       THROW_SQL_ERROR(ERR_CODE(ERRCODE_IO_ERROR),
                       ERR_MSG("ZIP source must remain a regular local file"));
     }
