@@ -80,7 +80,6 @@ struct Entry {
 
 struct Archive {
   std::string bytes;
-  std::vector<size_t> local;
   std::vector<size_t> central;
   std::vector<size_t> data;
 
@@ -90,7 +89,6 @@ struct Archive {
 
     for (const auto& entry : entries) {
       const auto offset = bytes.size();
-      local.push_back(offset);
       data.push_back(offset + 30 + entry.name.size() + (zip64 ? 20 : 0));
 
       const auto compressed = entry.method == sdb::connector::zip::kDeflate

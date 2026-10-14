@@ -102,7 +102,6 @@ class Reader {
   uint16_t _method = kStore;
   bool _started = false;
   bool _ended = false;
-  bool _verified = false;
   bool _failed = false;
   bool _crc_valid = true;
 };
