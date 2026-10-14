@@ -47,10 +47,12 @@ inline void Patch(std::string& output, size_t offset, uint64_t value,
 
 inline std::string Deflate(const std::string& input) {
   z_stream stream{};
+
   if (deflateInit2(&stream, 6, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY) !=
       Z_OK) {
     throw std::runtime_error{"deflateInit2 failed"};
   }
+
   std::string output(deflateBound(&stream, input.size()), '\0');
   stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(input.data()));
   stream.avail_in = input.size();
@@ -59,9 +61,11 @@ inline std::string Deflate(const std::string& input) {
   const auto result = deflate(&stream, Z_FINISH);
   output.resize(stream.total_out);
   deflateEnd(&stream);
+
   if (result != Z_STREAM_END) {
     throw std::runtime_error{"deflate failed"};
   }
+
   return output;
 }
 
@@ -83,10 +87,12 @@ struct Archive {
   explicit Archive(const std::vector<Entry>& entries, bool zip64 = false,
                    bool descriptor = false) {
     std::string directory;
+
     for (const auto& entry : entries) {
       const auto offset = bytes.size();
       local.push_back(offset);
       data.push_back(offset + 30 + entry.name.size() + (zip64 ? 20 : 0));
+
       const auto compressed = entry.method == sdb::connector::zip::kDeflate
                                 ? Deflate(entry.data)
                                 : entry.data;
@@ -94,6 +100,7 @@ struct Archive {
         crc32(0, reinterpret_cast<const Bytef*>(entry.data.data()),
               entry.data.size());
       const auto flags = entry.flags | (descriptor ? 8 : 0);
+
       Put(bytes, 0x04034b50, 4);
       Put(bytes, zip64 ? 45 : 20, 2);
       Put(bytes, flags, 2);
@@ -105,19 +112,23 @@ struct Archive {
       Put(bytes, entry.name.size(), 2);
       Put(bytes, zip64 ? 20 : 0, 2);
       bytes += entry.name;
+
       if (zip64) {
         Put(bytes, 1, 2);
         Put(bytes, 16, 2);
         Put(bytes, entry.data.size(), 8);
         Put(bytes, compressed.size(), 8);
       }
+
       bytes += compressed;
+
       if (descriptor) {
         Put(bytes, 0x08074b50, 4);
         Put(bytes, crc, 4);
         Put(bytes, compressed.size(), zip64 ? 8 : 4);
         Put(bytes, entry.data.size(), zip64 ? 8 : 4);
       }
+
       central.push_back(directory.size());
       Put(directory, 0x02014b50, 4);
       Put(directory, 0x32d, 2);
@@ -136,6 +147,7 @@ struct Archive {
       Put(directory, entry.attributes, 4);
       Put(directory, zip64 ? UINT32_MAX : offset, 4);
       directory += entry.name;
+
       if (zip64) {
         Put(directory, 1, 2);
         Put(directory, 24, 2);
@@ -143,13 +155,18 @@ struct Archive {
         Put(directory, compressed.size(), 8);
         Put(directory, offset, 8);
       }
+
       directory += entry.comment;
     }
+
     const auto cd_offset = bytes.size();
+
     for (auto& offset : central) {
       offset += cd_offset;
     }
+
     bytes += directory;
+
     if (zip64) {
       const auto end_offset = bytes.size();
       Put(bytes, 0x06064b50, 4);
@@ -167,6 +184,7 @@ struct Archive {
       Put(bytes, end_offset, 8);
       Put(bytes, 1, 4);
     }
+
     Put(bytes, 0x06054b50, 4);
     Put(bytes, 0, 4);
     Put(bytes, zip64 ? UINT16_MAX : entries.size(), 2);

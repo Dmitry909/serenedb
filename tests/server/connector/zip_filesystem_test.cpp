@@ -44,13 +44,16 @@ class ZipFileSystemTest : public testing::Test {
     auto fs = duckdb::make_uniq<sdb::connector::ZipFileSystem>();
     zip = fs.get();
     database.instance->GetFileSystem().RegisterSubSystem(std::move(fs));
+
     char pattern[] = "/tmp/sdb-zip-XXXXXX";
     auto* path = mkdtemp(pattern);
     if (!path) {
       throw std::runtime_error{"mkdtemp failed"};
     }
+
     directory = path;
   }
+
   ~ZipFileSystemTest() override { std::filesystem::remove_all(directory); }
 
   std::string Write(const std::vector<zip_test::Entry>& entries) {
@@ -59,8 +62,10 @@ class ZipFileSystemTest : public testing::Test {
     std::ofstream file{path, std::ios::binary};
     file.write(archive.bytes.data(), archive.bytes.size());
     file.close();
+
     return "zip://" + path + "/";
   }
+
   duckdb::unique_ptr<duckdb::FileHandle> Open(const std::string& path) {
     return zip->OpenFile(path, duckdb::FileFlags::FILE_FLAGS_READ, &opener);
   }
@@ -74,17 +79,21 @@ class ZipFileSystemTest : public testing::Test {
 
 TEST_F(ZipFileSystemTest, ConcurrentReadsAndIndependentHandles) {
   std::string data;
+
   for (size_t i = 0; i < 300000; ++i) {
     data += char(i * 13);
   }
+
   for (auto method : {kStore, kDeflate}) {
     const auto prefix = Write({{"data", data, method}, {"other", "other"}});
     auto file = Open(prefix + "data");
     auto other = Open(prefix + "other");
     std::vector<std::thread> threads;
+
     for (size_t thread = 0; thread < 4; ++thread) {
       threads.emplace_back([&, thread] {
         std::array<char, 113> buffer;
+
         for (size_t i = 0; i < 10; ++i) {
           const auto offset =
             (thread * 7907 + i * 2371) % (data.size() - buffer.size());
@@ -95,10 +104,13 @@ TEST_F(ZipFileSystemTest, ConcurrentReadsAndIndependentHandles) {
         }
       });
     }
+
     for (auto& thread : threads) {
       thread.join();
     }
+
     EXPECT_THROW(zip->Read(*file, nullptr, -1), irs::SqlException);
+
     file->Close();
     file->Close();
     EXPECT_THROW(zip->Seek(*file, 0), irs::SqlException);
@@ -116,6 +128,7 @@ TEST_F(ZipFileSystemTest, MissingForbiddenAndReadOnly) {
   EXPECT_TRUE(zip->FileExists(prefix + "data", &opener));
   EXPECT_EQ(zip->Glob(prefix + "data", &opener).size(), 1);
   EXPECT_THROW(zip->Glob(prefix + "../data", &opener), irs::SqlException);
+
   const auto relative =
     std::filesystem::relative(directory + "/data.zip").string();
   EXPECT_TRUE(zip->FileExists("zip://" + relative + "/data", &opener));
@@ -123,15 +136,15 @@ TEST_F(ZipFileSystemTest, MissingForbiddenAndReadOnly) {
   EXPECT_THROW(Open("zip://" + directory + "/pipe.zip/data"),
                duckdb::NotImplementedException);
   EXPECT_THROW(Open("zip://https://example.org/data.zip/data"),
-               duckdb::NotImplementedException);
-  EXPECT_THROW(Open("zip://s3://bucket/data.zip/data"),
-               duckdb::NotImplementedException);
+               irs::SqlException);
+  EXPECT_THROW(Open("zip://s3://bucket/data.zip/data"), irs::SqlException);
   EXPECT_THROW(zip->OpenFile(prefix + "data",
                              duckdb::FileFlags::FILE_FLAGS_WRITE, &opener),
                duckdb::NotImplementedException);
   EXPECT_THROW(
     zip->OpenFile(prefix + "data", duckdb::FileFlags::FILE_FLAGS_READ, nullptr),
     irs::SqlException);
+
   auto result = connection.Query("SET enable_external_access=false");
   result->Complete();
   ASSERT_FALSE(result->HasError()) << result->GetError();
@@ -161,6 +174,7 @@ TEST_F(ZipFileSystemTest, CancellationAndCorruptionReachCaller) {
     std::ofstream file{directory + "/bad.zip"};
     file << "not an archive";
   }
+
   EXPECT_THROW(zip->FileExists("zip://" + directory + "/bad.zip/data", &opener),
                irs::SqlException);
 }
@@ -175,6 +189,7 @@ TEST_F(ZipFileSystemTest, CsvJsonAndParquetQueries) {
   std::ifstream parquet_file{parquet_path, std::ios::binary};
   std::string parquet{std::istreambuf_iterator<char>{parquet_file},
                       std::istreambuf_iterator<char>{}};
+
   for (auto method : {kStore, kDeflate}) {
     const auto prefix =
       Write({{"data.csv", "id,value\n1,2\n2,4\n3,6\n", method},
@@ -187,6 +202,7 @@ TEST_F(ZipFileSystemTest, CsvJsonAndParquetQueries) {
               "\"value\":6}\n",
               method},
              {"data.parquet", parquet, method}});
+
     for (const auto& name :
          {"data.csv", "data.json", "data.jsonl", "data.parquet"}) {
       auto result =
@@ -195,17 +211,20 @@ TEST_F(ZipFileSystemTest, CsvJsonAndParquetQueries) {
       ASSERT_FALSE(result->HasError()) << name << ": " << result->GetError();
       EXPECT_EQ(result->Collection().GetValue(0, 0).ToString(),
                 std::string{name} == "data.parquet" ? "24995000" : "12");
+
       auto limited =
         connection.Query("SELECT id FROM '" + prefix + name + "' LIMIT 1");
       limited->Complete();
       ASSERT_FALSE(limited->HasError()) << limited->GetError();
       ASSERT_EQ(limited->RowCount(), 1);
+
       auto rows = connection.Query("SELECT id, value FROM '" + prefix + name +
                                    "' ORDER BY id");
       rows->Complete();
       ASSERT_FALSE(rows->HasError()) << rows->GetError();
       const bool is_parquet = std::string{name} == "data.parquet";
       ASSERT_EQ(rows->RowCount(), is_parquet ? 5000 : 3);
+
       for (size_t i = 0; i < rows->RowCount(); ++i) {
         const auto id = is_parquet ? i : i + 1;
         EXPECT_EQ(rows->Collection().GetValue(0, i).ToString(),
@@ -214,11 +233,13 @@ TEST_F(ZipFileSystemTest, CsvJsonAndParquetQueries) {
                   std::to_string(id * 2));
       }
     }
+
     auto filtered = connection.Query("SELECT sum(value) FROM '" + prefix +
                                      "data.parquet' WHERE id >= 4096");
     filtered->Complete();
     ASSERT_FALSE(filtered->HasError()) << filtered->GetError();
     EXPECT_EQ(filtered->Collection().GetValue(0, 0).ToString(), "8221880");
+
     const auto relative =
       std::filesystem::relative(directory + "/data.zip").string();
     auto relative_result = connection.Query(
@@ -237,6 +258,7 @@ TEST_F(ZipFileSystemTest, SqlErrorsReachCaller) {
     std::ofstream file{directory + "/data.zip", std::ios::binary};
     file.write(corrupt.bytes.data(), corrupt.bytes.size());
   }
+
   auto invalid =
     connection.Query("SELECT * FROM read_csv('" + prefix + "data.csv')");
   invalid->Complete();

@@ -299,6 +299,7 @@ TEST(ZipReader, MetadataCacheThresholdAndDiskOffsets) {
       entries.push_back({"file-" + std::to_string(i), "ok", kStore});
       base += 46 + entries.back().name.size();
     }
+
     size_t remaining = size - base;
     for (auto& entry : entries) {
       const auto count = std::min<size_t>(UINT16_MAX, remaining);
@@ -306,8 +307,10 @@ TEST(ZipReader, MetadataCacheThresholdAndDiskOffsets) {
       remaining -= count;
     }
     ASSERT_EQ(remaining, 0);
+
     zip_test::Archive archive{entries};
     ASSERT_EQ(archive.bytes.size() - 22 - archive.central.front(), size);
+
     Source source{archive.bytes};
     {
       Reader reader{source, "file-800"};
@@ -319,6 +322,7 @@ TEST(ZipReader, MetadataCacheThresholdAndDiskOffsets) {
       EXPECT_LE(source.largest_read, 65535 + 22);
       EXPECT_EQ(ReadAll(reader), "ok");
     }
+
     std::memcpy(archive.bytes.data() + archive.central[799] + 46, "file-800",
                 8);
     EXPECT_THROW((Reader{source, "file-800"}), irs::SqlException);

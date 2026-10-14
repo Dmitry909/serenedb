@@ -43,8 +43,11 @@ Path ParsePath(std::string_view path);
 class Source {
  public:
   virtual ~Source() = default;
+
   virtual uint64_t Size() const = 0;
+
   virtual void ReadAt(uint64_t offset, std::span<std::byte> output) = 0;
+
   virtual void Check() = 0;
 };
 
@@ -53,22 +56,34 @@ inline constexpr size_t kMetadataCacheLimit = 50 * 1024 * 1024;
 class Reader {
  public:
   Reader(Source& source, std::string_view member);
+
   ~Reader() noexcept;
+
   Reader(const Reader&) = delete;
+
   Reader& operator=(const Reader&) = delete;
 
   uint64_t Size() const { return _size; }
+
   uint64_t Position() const { return _position; }
+
   size_t Read(std::span<std::byte> output);
+
   void ReadAt(uint64_t offset, std::span<std::byte> output);
+
   void Seek(uint64_t offset);
 
  private:
   void Start();
+
   void Stop() noexcept;
+
   void Advance(uint64_t target);
+
   size_t Inflate(std::span<std::byte> output);
+
   void Finish();
+
   void CheckState();
 
   Source& _source;
