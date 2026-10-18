@@ -26,6 +26,7 @@
 
 namespace sdb::connector {
 
+// Opens and reads members of local ZIP archives through zip:// paths
 class ZipFileSystem final : public duckdb::FileSystem {
  public:
   std::string GetName() const final { return "ZipFileSystem"; }

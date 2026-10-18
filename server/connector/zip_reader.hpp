@@ -53,15 +53,16 @@ class Source {
 
 inline constexpr size_t kMetadataCacheLimit = 50 * 1024 * 1024;
 
-class Reader {
+// Manages the reading of a single file in a ZIP archive
+class MemberReader {
  public:
-  Reader(Source& source, std::string_view member);
+  MemberReader(Source& source, std::string_view member);
 
-  ~Reader() noexcept;
+  ~MemberReader() noexcept;
 
-  Reader(const Reader&) = delete;
+  MemberReader(const MemberReader&) = delete;
 
-  Reader& operator=(const Reader&) = delete;
+  MemberReader& operator=(const MemberReader&) = delete;
 
   uint64_t Size() const { return _size; }
 
@@ -81,6 +82,8 @@ class Reader {
   void Advance(uint64_t target);
 
   size_t Inflate(std::span<std::byte> output);
+
+  size_t ReadStored(std::span<std::byte> output);
 
   void Finish();
 

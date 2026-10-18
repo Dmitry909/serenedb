@@ -50,6 +50,7 @@ void InvalidException(const char* message) {
   THROW_SQL_ERROR(ERR_CODE(ERRCODE_IO_ERROR), ERR_MSG(message));
 }
 
+// Loads width bytes at the given offset as a little-endian integer
 uint64_t GetNumber(std::span<const std::byte> bytes, size_t offset,
                    size_t width) {
   if (offset > bytes.size() || width > bytes.size() - offset) {
@@ -75,7 +76,7 @@ void CheckRange(uint64_t offset, uint64_t length, uint64_t end) {
   }
 }
 
-void ValidateName(std::string_view name) {
+void ValidateZipMemberName(std::string_view name) {
   if (name.empty() || name.front() == '/' || name.find('\0') != name.npos ||
       name.find('\\') != name.npos || name.find(':') != name.npos) {
     InvalidException("Unsafe or unsupported ZIP member name");
@@ -105,8 +106,8 @@ void ValidateName(std::string_view name) {
   }
 }
 
-std::string Normalize(std::string_view name) {
-  ValidateName(name);
+std::string NormalizeZipMemberName(std::string_view name) {
+  ValidateZipMemberName(name);
   std::string result;
 
   while (!name.empty()) {
@@ -130,8 +131,10 @@ std::string Normalize(std::string_view name) {
   return result;
 }
 
-void Zip64(std::span<const std::byte> extra, uint64_t& size,
-           uint64_t& compressed, uint64_t& offset, uint64_t& disk) {
+// Reads ZIP64 extra fields to replace size, offset, and disk placeholders
+void ReadZip64ExtraField(std::span<const std::byte> extra, uint64_t& size,
+                         uint64_t& compressed, uint64_t& offset,
+                         uint64_t& disk) {
   bool found = false;
   size_t pos = 0;
 
@@ -171,7 +174,7 @@ void Zip64(std::span<const std::byte> extra, uint64_t& size,
   }
 }
 
-bool NameLess(std::string_view lhs, std::string_view rhs) {
+bool ZipMemberNameLess(std::string_view lhs, std::string_view rhs) {
   while (true) {
     const auto lslash = lhs.find('/');
     const auto rslash = rhs.find('/');
@@ -191,6 +194,8 @@ bool NameLess(std::string_view lhs, std::string_view rhs) {
   }
 }
 
+// Caches central directory metadata up to 50 MiB inclusive; larger directories
+// are read from storage on each Read call
 class CentralDirectory {
  public:
   CentralDirectory(Source& source, uint64_t offset, uint64_t size)
@@ -225,16 +230,17 @@ class CentralDirectory {
 
   void Add(uint64_t offset) { _entries.push_back(offset); }
 
-  void ValidateNames() {
+  void ValidateZipMemberNames() {
     std::sort(_entries.begin(), _entries.end(),
               [&](uint64_t lhs, uint64_t rhs) {
-                return NameLess(NameAt(lhs).first, NameAt(rhs).first);
+                return ZipMemberNameLess(ZipMemberNameAt(lhs).first,
+                                         ZipMemberNameAt(rhs).first);
               });
     std::string previous;
     bool previous_directory = true;
 
     for (auto offset : _entries) {
-      auto [name, directory] = NameAt(offset);
+      auto [name, directory] = ZipMemberNameAt(offset);
 
       if (name == previous ||
           (!previous_directory && name.starts_with(previous) &&
@@ -248,17 +254,31 @@ class CentralDirectory {
   }
 
  private:
-  std::pair<std::string, bool> NameAt(uint64_t offset) {
-    std::array<std::byte, 46> header;
+  std::pair<std::string, bool> ZipMemberNameAt(uint64_t offset) {
+    constexpr size_t kHeaderSize = 46;
+    constexpr size_t kNameLengthOffset = 28;
+    constexpr size_t kExternalAttributesOffset = 38;
+    constexpr uint32_t kDosDirectoryAttribute = 0x10;
+    constexpr unsigned kUnixModeShift = 16;
+    constexpr uint32_t kUnixFileTypeMask = 0170000;
+    constexpr uint32_t kUnixDirectoryType = 0040000;
+
+    std::array<std::byte, kHeaderSize> header;
     Read(offset, header);
-    std::vector<std::byte> name_bytes(GetNumber(header, 28, 2));
-    Read(offset + 46, name_bytes);
+
+    std::vector<std::byte> name_bytes(
+      GetNumber(header, kNameLengthOffset, sizeof(uint16_t)));
+    Read(offset + kHeaderSize, name_bytes);
+
     const std::string_view raw{reinterpret_cast<const char*>(name_bytes.data()),
                                name_bytes.size()};
-    auto name = Normalize(raw);
-    const auto attributes = GetNumber(header, 38, 4);
-    const bool directory = raw.back() == '/' || (attributes & 0x10) ||
-                           ((attributes >> 16) & 0170000) == 0040000;
+    auto name = NormalizeZipMemberName(raw);
+    const auto attributes =
+      GetNumber(header, kExternalAttributesOffset, sizeof(uint32_t));
+    const bool directory =
+      raw.back() == '/' || (attributes & kDosDirectoryAttribute) ||
+      ((attributes >> kUnixModeShift) & kUnixFileTypeMask) ==
+        kUnixDirectoryType;
 
     return {std::move(name), directory};
   }
@@ -305,12 +325,13 @@ Path ParsePath(std::string_view path) {
       "ZIP path must select one file, not an archive or directory");
   }
 
-  ValidateName(result.member);
+  ValidateZipMemberName(result.member);
 
   return result;
 }
 
-Reader::Reader(Source& source, std::string_view member) : _source{source} {
+MemberReader::MemberReader(Source& source, std::string_view member)
+  : _source{source} {
   const auto entry = FindEntry(source, member);
   _size = entry.size;
   _compressed_size = entry.compressed_size;
@@ -319,24 +340,102 @@ Reader::Reader(Source& source, std::string_view member) : _source{source} {
   _method = entry.method;
 }
 
-Reader::~Reader() noexcept { Stop(); }
+MemberReader::~MemberReader() noexcept { Stop(); }
 
 namespace {
 
+// Finds the requested archive member and returns its validated metadata
 EntryInfo FindEntry(Source& source, std::string_view member) {
-  EntryInfo entry_info{};
-  source.Check();
-  const auto file_size = source.Size();
-  const auto wanted = Normalize(member);
-  std::vector<std::byte> tail;
-  tail.resize(std::min<uint64_t>(file_size, 65535 + 22));
-  source.ReadAt(file_size - tail.size(), tail);
-  size_t eocd = tail.size();
+  constexpr size_t kEocdSize = 22;
+  constexpr size_t kEocdCommentLengthOffset = 20;
+  constexpr size_t kEocdDiskOffset = 4;
+  constexpr size_t kEocdDirectoryDiskOffset = 6;
+  constexpr size_t kEocdDiskEntryCountOffset = 8;
+  constexpr size_t kEocdEntryCountOffset = 10;
+  constexpr size_t kEocdDirectorySizeOffset = 12;
+  constexpr size_t kEocdDirectoryOffset = 16;
 
-  if (tail.size() >= 22) {
-    for (size_t i = tail.size() - 22 + 1; i-- > 0;) {
-      if (GetNumber(tail, i, 4) == 0x06054b50 &&
-          GetNumber(tail, i + 20, 2) == tail.size() - i - 22) {
+  constexpr size_t kZip64LocatorSize = 20;
+  constexpr size_t kZip64LocatorDiskOffset = 4;
+  constexpr size_t kZip64LocatorDiskCountOffset = 16;
+  constexpr size_t kZip64LocatorRecordOffset = 8;
+
+  constexpr size_t kZip64EndSize = 56;
+  constexpr size_t kZip64EndLengthOffset = 4;
+  constexpr size_t kZip64EndMinPayloadSize = 44;
+  constexpr size_t kZip64EndPrefixSize = 12;
+  constexpr size_t kZip64EndDiskOffset = 16;
+  constexpr size_t kZip64EndDirectoryDiskOffset = 20;
+  constexpr size_t kZip64EndDiskEntryCountOffset = 24;
+  constexpr size_t kZip64EndEntryCountOffset = 32;
+  constexpr size_t kZip64EndDirectorySizeOffset = 40;
+  constexpr size_t kZip64EndDirectoryOffset = 48;
+
+  constexpr size_t kCentralHeaderSize = 46;
+  constexpr size_t kCentralHeaderNameLengthOffset = 28;
+  constexpr size_t kCentralHeaderExtraLengthOffset = 30;
+  constexpr size_t kCentralHeaderCommentLengthOffset = 32;
+  constexpr size_t kCentralHeaderFlagsOffset = 8;
+  constexpr size_t kCentralHeaderAttributesOffset = 38;
+  constexpr size_t kCentralHeaderSizeOffset = 24;
+  constexpr size_t kCentralHeaderCompressedSizeOffset = 20;
+  constexpr size_t kCentralHeaderLocalHeaderOffset = 42;
+  constexpr size_t kCentralHeaderDiskOffset = 34;
+  constexpr size_t kCentralHeaderMethodOffset = 10;
+  constexpr size_t kCentralHeaderCrcOffset = 16;
+
+  constexpr size_t kLocalHeaderSize = 30;
+  constexpr size_t kLocalHeaderFlagsOffset = 6;
+  constexpr size_t kLocalHeaderMethodOffset = 8;
+  constexpr size_t kLocalHeaderNameLengthOffset = 26;
+  constexpr size_t kLocalHeaderExtraLengthOffset = 28;
+  constexpr size_t kLocalHeaderSizeOffset = 22;
+  constexpr size_t kLocalHeaderCompressedSizeOffset = 18;
+  constexpr size_t kLocalHeaderCrcOffset = 14;
+
+  constexpr size_t kMaxCommentSize = UINT16_MAX;
+  constexpr size_t kSignatureOffset = 0;
+  constexpr uint32_t kEocdSignature = 0x06054b50;
+  constexpr uint32_t kZip64LocatorSignature = 0x07064b50;
+  constexpr uint32_t kZip64EndSignature = 0x06064b50;
+  constexpr uint32_t kCentralHeaderSignature = 0x02014b50;
+  constexpr uint32_t kLocalHeaderSignature = 0x04034b50;
+  constexpr uint32_t kDescriptorSignature = 0x08074b50;
+  constexpr uint32_t kSingleDiskCount = 1;
+
+  constexpr uint32_t kDosDirectoryAttribute = 0x10;
+  constexpr unsigned kUnixModeShift = 16;
+  constexpr uint32_t kUnixFileTypeMask = 0170000;
+  constexpr uint32_t kUnixRegularFileType = 0100000;
+  constexpr uint32_t kUnixDirectoryType = 0040000;
+  constexpr uint16_t kEncryptedFlag = 1;
+  constexpr uint16_t kPatchedDataFlag = 32;
+  constexpr uint16_t kStrongEncryptionFlag = 64;
+  constexpr uint16_t kMaskedHeaderFlag = 8192;
+  constexpr uint16_t kDataDescriptorFlag = 8;
+
+  constexpr size_t kDescriptorMaxSize = 24;
+  constexpr size_t kDescriptorCrcSize = sizeof(uint32_t);
+  constexpr size_t kDescriptorSizeFieldCount = 2;
+  constexpr size_t kDescriptorSignatureSize = sizeof(uint32_t);
+
+  source.Check();
+
+  EntryInfo entry_info{};
+  const auto file_size = source.Size();
+  const auto wanted = NormalizeZipMemberName(member);
+  std::vector<std::byte> tail(
+    std::min<uint64_t>(file_size, kMaxCommentSize + kEocdSize));
+  source.ReadAt(file_size - tail.size(), tail);
+
+  // 1. Locate the central directory and read its size and entry count
+  size_t eocd = tail.size();
+  // 1.1. Find the end-of-central-directory record offset within the tail buffer
+  if (tail.size() >= kEocdSize) {
+    for (size_t i = tail.size() - kEocdSize + 1; i-- > 0;) {
+      if (GetNumber(tail, i, sizeof(uint32_t)) == kEocdSignature &&
+          GetNumber(tail, i + kEocdCommentLengthOffset, sizeof(uint16_t)) ==
+            tail.size() - i - kEocdSize) {
         eocd = i;
         break;
       }
@@ -347,60 +446,77 @@ EntryInfo FindEntry(Source& source, std::string_view member) {
     InvalidException("ZIP end of central directory not found");
   }
 
-  if (GetNumber(tail, eocd + 4, 2) || GetNumber(tail, eocd + 6, 2) ||
-      GetNumber(tail, eocd + 8, 2) != GetNumber(tail, eocd + 10, 2)) {
+  if (GetNumber(tail, eocd + kEocdDiskOffset, sizeof(uint16_t)) ||
+      GetNumber(tail, eocd + kEocdDirectoryDiskOffset, sizeof(uint16_t)) ||
+      GetNumber(tail, eocd + kEocdDiskEntryCountOffset, sizeof(uint16_t)) !=
+        GetNumber(tail, eocd + kEocdEntryCountOffset, sizeof(uint16_t))) {
     THROW_SQL_ERROR(ERR_CODE(ERRCODE_FEATURE_NOT_SUPPORTED),
                     ERR_MSG("Multi-disk ZIP is not supported"));
   }
 
-  uint64_t count = GetNumber(tail, eocd + 10, 2);
-  uint64_t cd_size = GetNumber(tail, eocd + 12, 4);
-  uint64_t cd_offset = GetNumber(tail, eocd + 16, 4);
+  uint64_t count =
+    GetNumber(tail, eocd + kEocdEntryCountOffset, sizeof(uint16_t));
+  uint64_t cd_size =
+    GetNumber(tail, eocd + kEocdDirectorySizeOffset, sizeof(uint32_t));
+  uint64_t cd_offset =
+    GetNumber(tail, eocd + kEocdDirectoryOffset, sizeof(uint32_t));
   uint64_t cd_bound = file_size - tail.size() + eocd;
 
+  // 1.2. Read ZIP64 directory metadata if required
   if (count == UINT16_MAX || cd_size == kMax32 || cd_offset == kMax32) {
-    if (cd_bound < 20) {
+    if (cd_bound < kZip64LocatorSize) {
       InvalidException("Missing ZIP64 locator");
     }
 
-    std::array<std::byte, 20> locator;
-    source.ReadAt(cd_bound - 20, locator);
+    std::array<std::byte, kZip64LocatorSize> locator;
+    source.ReadAt(cd_bound - kZip64LocatorSize, locator);
 
-    if (GetNumber(locator, 0, 4) != 0x07064b50 || GetNumber(locator, 4, 4) ||
-        GetNumber(locator, 16, 4) != 1) {
+    if (GetNumber(locator, kSignatureOffset, sizeof(uint32_t)) !=
+          kZip64LocatorSignature ||
+        GetNumber(locator, kZip64LocatorDiskOffset, sizeof(uint32_t)) ||
+        GetNumber(locator, kZip64LocatorDiskCountOffset, sizeof(uint32_t)) !=
+          kSingleDiskCount) {
       InvalidException("Invalid or multi-disk ZIP64 locator");
     }
 
-    auto zip64_offset = GetNumber(locator, 8, 8);
-    CheckRange(zip64_offset, 56, cd_bound - 20);
-    std::array<std::byte, 56> header;
+    auto zip64_offset =
+      GetNumber(locator, kZip64LocatorRecordOffset, sizeof(uint64_t));
+    CheckRange(zip64_offset, kZip64EndSize, cd_bound - kZip64LocatorSize);
+    std::array<std::byte, kZip64EndSize> header;
     source.ReadAt(zip64_offset, header);
-    auto length = GetNumber(header, 4, 8);
+    auto length = GetNumber(header, kZip64EndLengthOffset, sizeof(uint64_t));
 
-    if (GetNumber(header, 0, 4) != 0x06064b50 || length < 44 ||
-        GetNumber(header, 16, 4) || GetNumber(header, 20, 4) ||
-        GetNumber(header, 24, 8) != GetNumber(header, 32, 8)) {
+    if (GetNumber(header, kSignatureOffset, sizeof(uint32_t)) !=
+          kZip64EndSignature ||
+        length < kZip64EndMinPayloadSize ||
+        GetNumber(header, kZip64EndDiskOffset, sizeof(uint32_t)) ||
+        GetNumber(header, kZip64EndDirectoryDiskOffset, sizeof(uint32_t)) ||
+        GetNumber(header, kZip64EndDiskEntryCountOffset, sizeof(uint64_t)) !=
+          GetNumber(header, kZip64EndEntryCountOffset, sizeof(uint64_t))) {
       InvalidException("Invalid ZIP64 end record");
     }
 
-    CheckRange(zip64_offset + 12, length, cd_bound - 20);
+    CheckRange(zip64_offset + kZip64EndPrefixSize, length,
+               cd_bound - kZip64LocatorSize);
 
-    if (zip64_offset + 12 + length != cd_bound - 20) {
+    if (zip64_offset + kZip64EndPrefixSize + length !=
+        cd_bound - kZip64LocatorSize) {
       InvalidException("Invalid ZIP64 end record length");
     }
 
-    count = GetNumber(header, 32, 8);
-    cd_size = GetNumber(header, 40, 8);
-    cd_offset = GetNumber(header, 48, 8);
+    count = GetNumber(header, kZip64EndEntryCountOffset, sizeof(uint64_t));
+    cd_size = GetNumber(header, kZip64EndDirectorySizeOffset, sizeof(uint64_t));
+    cd_offset = GetNumber(header, kZip64EndDirectoryOffset, sizeof(uint64_t));
     cd_bound = zip64_offset;
   }
 
   CheckRange(cd_offset, cd_size, cd_bound);
 
-  if (count > cd_size / 46) {
+  if (count > cd_size / kCentralHeaderSize) {
     InvalidException("Invalid ZIP entry count");
   }
 
+  // 2. Scan and validate the central directory to find the requested member
   CentralDirectory directory_index{source, cd_offset, cd_size};
   std::vector<std::byte> variable;
   std::string selected_name;
@@ -409,64 +525,80 @@ EntryInfo FindEntry(Source& source, std::string_view member) {
   bool found = false;
   uint64_t cursor = cd_offset;
 
+  // 2.1. Read and validate each central directory entry
   for (uint64_t i = 0; i < count; ++i) {
     source.Check();
-    std::array<std::byte, 46> header;
+    std::array<std::byte, kCentralHeaderSize> header;
     directory_index.Read(cursor, header);
 
-    if (GetNumber(header, 0, 4) != 0x02014b50) {
+    if (GetNumber(header, kSignatureOffset, sizeof(uint32_t)) !=
+        kCentralHeaderSignature) {
       InvalidException("Invalid ZIP central directory header");
     }
 
-    auto name_size = GetNumber(header, 28, 2);
-    auto extra_size = GetNumber(header, 30, 2);
-    auto comment_size = GetNumber(header, 32, 2);
-    CheckRange(cursor + 46, name_size + extra_size + comment_size,
-               cd_offset + cd_size);
+    auto name_size =
+      GetNumber(header, kCentralHeaderNameLengthOffset, sizeof(uint16_t));
+    auto extra_size =
+      GetNumber(header, kCentralHeaderExtraLengthOffset, sizeof(uint16_t));
+    auto comment_size =
+      GetNumber(header, kCentralHeaderCommentLengthOffset, sizeof(uint16_t));
+    CheckRange(cursor + kCentralHeaderSize,
+               name_size + extra_size + comment_size, cd_offset + cd_size);
     variable.resize(name_size + extra_size);
-    directory_index.Read(cursor + 46, variable);
+    directory_index.Read(cursor + kCentralHeaderSize, variable);
     std::string_view raw{reinterpret_cast<const char*>(variable.data()),
                          name_size};
-    auto name = Normalize(raw);
-    const auto flags = GetNumber(header, 8, 2);
-    const auto attributes = GetNumber(header, 38, 4);
-    const auto unix_type = (attributes >> 16) & 0170000;
-    bool directory =
-      raw.back() == '/' || (attributes & 0x10) || unix_type == 0040000;
+    auto name = NormalizeZipMemberName(raw);
+    const auto flags =
+      GetNumber(header, kCentralHeaderFlagsOffset, sizeof(uint16_t));
+    const auto attributes =
+      GetNumber(header, kCentralHeaderAttributesOffset, sizeof(uint32_t));
+    const auto unix_type = (attributes >> kUnixModeShift) & kUnixFileTypeMask;
+    bool directory = raw.back() == '/' ||
+                     (attributes & kDosDirectoryAttribute) ||
+                     unix_type == kUnixDirectoryType;
 
-    if (unix_type && unix_type != 0100000 && unix_type != 0040000) {
+    if (unix_type && unix_type != kUnixRegularFileType &&
+        unix_type != kUnixDirectoryType) {
       THROW_SQL_ERROR(
         ERR_CODE(ERRCODE_FEATURE_NOT_SUPPORTED),
         ERR_MSG("ZIP symlink and special entries are not supported"));
     }
 
     directory_index.Add(cursor);
-    uint64_t size = GetNumber(header, 24, 4);
-    uint64_t compressed = GetNumber(header, 20, 4);
-    uint64_t offset = GetNumber(header, 42, 4);
-    uint64_t disk = GetNumber(header, 34, 2);
-    Zip64(std::span{variable}.subspan(name_size), size, compressed, offset,
-          disk);
+    uint64_t size =
+      GetNumber(header, kCentralHeaderSizeOffset, sizeof(uint32_t));
+    uint64_t compressed =
+      GetNumber(header, kCentralHeaderCompressedSizeOffset, sizeof(uint32_t));
+    uint64_t offset =
+      GetNumber(header, kCentralHeaderLocalHeaderOffset, sizeof(uint32_t));
+    uint64_t disk =
+      GetNumber(header, kCentralHeaderDiskOffset, sizeof(uint16_t));
+    ReadZip64ExtraField(std::span{variable}.subspan(name_size), size,
+                        compressed, offset, disk);
 
     if (disk) {
       THROW_SQL_ERROR(ERR_CODE(ERRCODE_FEATURE_NOT_SUPPORTED),
                       ERR_MSG("Multi-disk ZIP is not supported"));
     }
 
-    CheckRange(offset, 30, cd_offset);
+    CheckRange(offset, kLocalHeaderSize, cd_offset);
 
+    // 2.2. Save metadata for the requested member
     if (name == wanted) {
       if (directory) {
         InvalidException("ZIP member is a directory");
       }
 
-      if (flags & (1 | 32 | 64 | 8192)) {
+      if (flags & (kEncryptedFlag | kPatchedDataFlag | kStrongEncryptionFlag |
+                   kMaskedHeaderFlag)) {
         THROW_SQL_ERROR(
           ERR_CODE(ERRCODE_FEATURE_NOT_SUPPORTED),
           ERR_MSG("Encrypted or patched ZIP entries are not supported"));
       }
 
-      entry_info.method = GetNumber(header, 10, 2);
+      entry_info.method =
+        GetNumber(header, kCentralHeaderMethodOffset, sizeof(uint16_t));
 
       if (entry_info.method != kStore && entry_info.method != kDeflate) {
         THROW_SQL_ERROR(ERR_CODE(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -479,93 +611,113 @@ EntryInfo FindEntry(Source& source, std::string_view member) {
 
       entry_info.size = size;
       entry_info.compressed_size = compressed;
-      entry_info.crc = GetNumber(header, 16, 4);
+      entry_info.crc =
+        GetNumber(header, kCentralHeaderCrcOffset, sizeof(uint32_t));
       selected_offset = offset;
       selected_flags = flags;
       selected_name.assign(raw);
       found = true;
     }
 
-    cursor += 46 + name_size + extra_size + comment_size;
+    cursor += kCentralHeaderSize + name_size + extra_size + comment_size;
   }
 
+  // 2.3. Validate directory size and member names, and require a match
   if (cursor != cd_offset + cd_size) {
     InvalidException("ZIP central directory size mismatch");
   }
 
-  directory_index.ValidateNames();
+  directory_index.ValidateZipMemberNames();
 
   if (!found) {
     THROW_SQL_ERROR(ERR_CODE(ERRCODE_UNDEFINED_FILE),
                     ERR_MSG("ZIP member not found"));
   }
 
-  std::array<std::byte, 30> local;
+  // 3. Validate the selected member's local header and locate its data
+  std::array<std::byte, kLocalHeaderSize> local;
   source.ReadAt(selected_offset, local);
 
-  if (GetNumber(local, 0, 4) != 0x04034b50 ||
-      GetNumber(local, 6, 2) != selected_flags ||
-      GetNumber(local, 8, 2) != entry_info.method) {
+  if (GetNumber(local, kSignatureOffset, sizeof(uint32_t)) !=
+        kLocalHeaderSignature ||
+      GetNumber(local, kLocalHeaderFlagsOffset, sizeof(uint16_t)) !=
+        selected_flags ||
+      GetNumber(local, kLocalHeaderMethodOffset, sizeof(uint16_t)) !=
+        entry_info.method) {
     InvalidException("ZIP local header disagrees with central directory");
   }
 
-  auto name_size = GetNumber(local, 26, 2);
-  auto extra_size = GetNumber(local, 28, 2);
-  CheckRange(selected_offset + 30, name_size + extra_size, cd_offset);
+  auto name_size =
+    GetNumber(local, kLocalHeaderNameLengthOffset, sizeof(uint16_t));
+  auto extra_size =
+    GetNumber(local, kLocalHeaderExtraLengthOffset, sizeof(uint16_t));
+  CheckRange(selected_offset + kLocalHeaderSize, name_size + extra_size,
+             cd_offset);
   variable.resize(name_size + extra_size);
-  source.ReadAt(selected_offset + 30, variable);
+  source.ReadAt(selected_offset + kLocalHeaderSize, variable);
 
   if (std::string_view{reinterpret_cast<const char*>(variable.data()),
                        name_size} != selected_name) {
     InvalidException("ZIP local filename disagrees with central directory");
   }
 
-  entry_info.data_offset = selected_offset + 30 + name_size + extra_size;
+  entry_info.data_offset =
+    selected_offset + kLocalHeaderSize + name_size + extra_size;
   CheckRange(entry_info.data_offset, entry_info.compressed_size, cd_offset);
-  uint64_t local_size = GetNumber(local, 22, 4);
-  uint64_t local_compressed = GetNumber(local, 18, 4);
+  uint64_t local_size =
+    GetNumber(local, kLocalHeaderSizeOffset, sizeof(uint32_t));
+  uint64_t local_compressed =
+    GetNumber(local, kLocalHeaderCompressedSizeOffset, sizeof(uint32_t));
   uint64_t unused_offset = 0;
   uint64_t unused_disk = 0;
   bool descriptor64 = local_size == kMax32 || local_compressed == kMax32 ||
                       entry_info.size >= kMax32 ||
                       entry_info.compressed_size >= kMax32;
-  Zip64(std::span{variable}.subspan(name_size), local_size, local_compressed,
-        unused_offset, unused_disk);
+  ReadZip64ExtraField(std::span{variable}.subspan(name_size), local_size,
+                      local_compressed, unused_offset, unused_disk);
 
-  if (!(selected_flags & 8)) {
+  // 4. Validate sizes and CRC against the local header or data descriptor
+  if (!(selected_flags & kDataDescriptorFlag)) {
     if (local_size != entry_info.size ||
         local_compressed != entry_info.compressed_size ||
-        GetNumber(local, 14, 4) != entry_info.crc) {
+        GetNumber(local, kLocalHeaderCrcOffset, sizeof(uint32_t)) !=
+          entry_info.crc) {
       InvalidException(
         "ZIP local sizes or CRC disagree with central directory");
     }
   } else {
     if ((local_size && local_size != entry_info.size) ||
         (local_compressed && local_compressed != entry_info.compressed_size) ||
-        (GetNumber(local, 14, 4) &&
-         GetNumber(local, 14, 4) != entry_info.crc)) {
+        (GetNumber(local, kLocalHeaderCrcOffset, sizeof(uint32_t)) &&
+         GetNumber(local, kLocalHeaderCrcOffset, sizeof(uint32_t)) !=
+           entry_info.crc)) {
       InvalidException("ZIP local header disagrees with data descriptor");
     }
 
     const auto descriptor_offset =
       entry_info.data_offset + entry_info.compressed_size;
-    std::array<std::byte, 24> descriptor;
-    const size_t width = descriptor64 ? 8 : 4;
-    CheckRange(descriptor_offset, 4 + 2 * width, cd_offset);
+    std::array<std::byte, kDescriptorMaxSize> descriptor;
+    const size_t width = descriptor64 ? sizeof(uint64_t) : sizeof(uint32_t);
+    CheckRange(descriptor_offset,
+               kDescriptorCrcSize + kDescriptorSizeFieldCount * width,
+               cd_offset);
     const auto available =
       std::min<uint64_t>(descriptor.size(), cd_offset - descriptor_offset);
     source.ReadAt(descriptor_offset, std::span{descriptor}.first(available));
     const auto matches = [&](size_t prefix) {
-      return prefix + 4 + 2 * width <= available &&
-             GetNumber(descriptor, prefix, 4) == entry_info.crc &&
-             GetNumber(descriptor, prefix + 4, width) ==
+      return prefix + kDescriptorCrcSize + kDescriptorSizeFieldCount * width <=
+               available &&
+             GetNumber(descriptor, prefix, sizeof(uint32_t)) ==
+               entry_info.crc &&
+             GetNumber(descriptor, prefix + kDescriptorCrcSize, width) ==
                entry_info.compressed_size &&
-             GetNumber(descriptor, prefix + 4 + width, width) ==
-               entry_info.size;
+             GetNumber(descriptor, prefix + kDescriptorCrcSize + width,
+                       width) == entry_info.size;
     };
 
-    if (!matches(0) &&
-        !(GetNumber(descriptor, 0, 4) == 0x08074b50 && matches(4))) {
+    if (!matches(0) && !(GetNumber(descriptor, kSignatureOffset,
+                                   sizeof(uint32_t)) == kDescriptorSignature &&
+                         matches(kDescriptorSignatureSize))) {
       InvalidException("ZIP data descriptor disagrees with central directory");
     }
   }
@@ -580,14 +732,14 @@ EntryInfo FindEntry(Source& source, std::string_view member) {
 
 }  // namespace
 
-void Reader::Stop() noexcept {
+void MemberReader::Stop() noexcept {
   if (_started) {
     inflateEnd(&_stream);
     _started = false;
   }
 }
 
-void Reader::Start() {
+void MemberReader::Start() {
   Stop();
   _input.resize(kChunk);
   _discard.resize(kChunk);
@@ -606,7 +758,7 @@ void Reader::Start() {
   _ended = false;
 }
 
-void Reader::CheckState() {
+void MemberReader::CheckState() {
   if (_failed) {
     InvalidException("ZIP reader is in failed state; reopen the file");
   }
@@ -614,9 +766,12 @@ void Reader::CheckState() {
   _source.Check();
 }
 
-size_t Reader::Inflate(std::span<std::byte> output) {
+// Decompresses DEFLATE data into output, producing at most kChunk bytes per
+// call
+size_t MemberReader::Inflate(std::span<std::byte> output) {
   _source.Check();
 
+  // 1. Prepare data for decompression
   if (!_stream.avail_in && _loaded < _compressed_size) {
     const auto count = std::min<uint64_t>(kChunk, _compressed_size - _loaded);
     _source.ReadAt(_data_offset + _loaded, std::span{_input}.first(count));
@@ -628,6 +783,8 @@ size_t Reader::Inflate(std::span<std::byte> output) {
   const auto count = std::min(output.size(), kChunk);
   _stream.next_out = reinterpret_cast<Bytef*>(output.data());
   _stream.avail_out = count;
+
+  // 2. Decompress using zlib and check the result
   const auto status = inflate(&_stream, Z_NO_FLUSH);
 
   if (status == Z_MEM_ERROR) {
@@ -657,7 +814,31 @@ size_t Reader::Inflate(std::span<std::byte> output) {
   return produced;
 }
 
-void Reader::Advance(uint64_t target) {
+// Fills output with uncompressed data in portions of at most kChunk bytes
+size_t MemberReader::ReadStored(std::span<std::byte> output) {
+  if (_position != _crc_position) {
+    _crc_valid = false;
+  }
+
+  size_t done = 0;
+  while (done < output.size()) {
+    _source.Check();
+    auto part = output.subspan(done, std::min(kChunk, output.size() - done));
+    _source.ReadAt(_data_offset + _position + done, part);
+
+    if (_crc_valid) {
+      _crc =
+        crc32(_crc, reinterpret_cast<const Bytef*>(part.data()), part.size());
+      _crc_position += part.size();
+    }
+
+    done += part.size();
+  }
+
+  return done;
+}
+
+void MemberReader::Advance(uint64_t target) {
   if (!_started || target < _decoded) {
     Start();
   }
@@ -668,7 +849,7 @@ void Reader::Advance(uint64_t target) {
   }
 }
 
-void Reader::Finish() {
+void MemberReader::Finish() {
   if (_method == kDeflate && !_ended) {
     std::array<std::byte, 1> probe;
     while (!_ended) {
@@ -679,7 +860,8 @@ void Reader::Finish() {
   }
 }
 
-size_t Reader::Read(std::span<std::byte> output) {
+// Reads member data at the current position and advances it by the bytes read
+size_t MemberReader::Read(std::span<std::byte> output) {
   try {
     CheckState();
 
@@ -697,23 +879,7 @@ size_t Reader::Read(std::span<std::byte> output) {
         done += Inflate(output.subspan(done, count - done));
       }
     } else {
-      if (_position != _crc_position) {
-        _crc_valid = false;
-      }
-
-      for (size_t done = 0; done < count;) {
-        _source.Check();
-        auto part = output.subspan(done, std::min(kChunk, count - done));
-        _source.ReadAt(_data_offset + _position + done, part);
-
-        if (_crc_valid) {
-          _crc = crc32(_crc, reinterpret_cast<const Bytef*>(part.data()),
-                       part.size());
-          _crc_position += part.size();
-        }
-
-        done += part.size();
-      }
+      count = ReadStored(output.first(count));
     }
 
     _position += count;
@@ -728,7 +894,7 @@ size_t Reader::Read(std::span<std::byte> output) {
   }
 }
 
-void Reader::Seek(uint64_t offset) {
+void MemberReader::Seek(uint64_t offset) {
   CheckState();
   CheckRange(offset, 0, _size);
   _position = offset;
@@ -740,7 +906,7 @@ void Reader::Seek(uint64_t offset) {
   }
 }
 
-void Reader::ReadAt(uint64_t offset, std::span<std::byte> output) {
+void MemberReader::ReadAt(uint64_t offset, std::span<std::byte> output) {
   CheckRange(offset, output.size(), _size);
   Seek(offset);
   Read(output);
